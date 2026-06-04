@@ -279,7 +279,7 @@ fn load_git_metadata() -> Result<LauncherGitMetadata, String> {
 }
 
 #[tauri::command]
-fn download_and_launch_version(tag: String, config_id: Option<i32>) -> Result<(), String> {
+fn download_and_launch_version(tag: String, config_id: Option<i32>, appid: i32) -> Result<(), String> {
     if tag.trim().is_empty() || tag == "Unavailable" {
         return Err("no release version is selected".to_string());
     }
@@ -312,7 +312,7 @@ fn download_and_launch_version(tag: String, config_id: Option<i32>) -> Result<()
         &cloud_dir,
         config_id,
     )?;
-    restart_csgo()?;
+    restart_csgo(appid)?;
     spawn_hidden(&install_dir.join("injector.exe"), &install_dir)?;
 
     Ok(())
@@ -358,6 +358,23 @@ fn csgo_install_dir() -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 fn csgo_install_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn steam_install_dir() -> Option<PathBuf> {
+    let local_machine = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = local_machine
+        .open_subkey("SOFTWARE\\WOW6432Node\\Valve\\Steam")
+        .ok()?;
+    let install_path: String = key.get_value("InstallPath").ok()?;
+    let path = PathBuf::from(install_path);
+
+    path.join("steam.exe").exists().then_some(path)
+}
+
+#[cfg(not(windows))]
+fn steam_install_dir() -> Option<PathBuf> {
     None
 }
 
@@ -430,19 +447,42 @@ fn spawn_server_hidden(
         .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
 }
 
+#[tauri::command]
 #[cfg(windows)]
-fn restart_csgo() -> Result<(), String> {
-    close_csgo_if_running()?;
-    let game_dir =
-        csgo_install_dir().ok_or_else(|| "failed to find CS:GO install path".to_string())?;
-    let exe = game_dir.join("csgo.exe");
-
-    Command::new(&exe)
-        .args(["-steam", "-insecure", "-novid"])
-        .current_dir(&game_dir)
+fn kill_background_processes() -> Result<(), String> {
+    Command::new("taskkill")
+        .args(["/im", "injector.exe", "/f"])
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
+        .map_err(|error| format!("failed to kill injector: {error}"))?;
+
+    Command::new("taskkill")
+        .args(["/im", "neverlose-server.exe", "/f"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to kill neverlose server: {error}"))?;
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restart_csgo(appid: i32) -> Result<(), String> {
+    close_csgo_if_running()?;
+
+    let steam_dir = steam_install_dir().ok_or_else(|| "failed to find Steam install path".to_string())?;
+    let steam = steam_dir.join("steam.exe");
+
+    let protocol_string = format!("steam://launch/{}/dialog", appid);
+
+    Command::new(&steam)
+        // fix: steam ignores extra arguments when using steam://launch/id.
+        //      using steam://run or -applaunch accepts arguments but won't let you select betas,
+        //      so cs2 will run for appid 730. volvo pls fix
+        .args([&protocol_string, "-steam", "-insecure", "-novid"])
+        .current_dir(&steam_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch {}: {error}", steam.display()))
 }
 
 #[cfg(not(windows))]
@@ -787,7 +827,8 @@ pub fn run() {
             load_git_metadata,
             download_and_launch_version,
             minimize_main_window,
-            close_main_window
+            close_main_window,
+            kill_background_processes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
