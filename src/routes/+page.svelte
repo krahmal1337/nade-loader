@@ -9,6 +9,19 @@
     entry_id: number;
     name: string;
   };
+  type LauncherVersion = {
+    tag: string;
+    name: string;
+    changelog: string;
+    updated_at: string;
+    url: string;
+    assets: LauncherAsset[];
+  };
+  type LauncherAsset = {
+    name: string;
+    url: string;
+    size: number;
+  };
 
   let view = $state<View>('boot');
   let branch = $state<Branch>('Release');
@@ -17,22 +30,30 @@
   let configOpen = $state(false);
   let configs = $state<ConfigEntry[]>([]);
   let selectedConfigId = $state<number | null>(null);
-  let selectedVersion = $state('v1.0.4');
+  let gitMetadata = $state<LauncherGitMetadata>({
+    releases: [],
+    nightlies: []
+  });
+  let selectedVersion = $state('');
   let launchPending = $state(false);
   let progress = $state(0);
   let themeVariables = $state('');
   let launchTimer: number | undefined;
   let closeTimer: number | undefined;
 
-  const selectedBranchLabel = $derived(
-    `${branch} ${selectedVersion}`
+  const selectedVersionList = $derived(branch === 'Release' ? gitMetadata.releases : gitMetadata.nightlies);
+  const selectedVersionData = $derived(
+    selectedVersionList.find((version) => version.tag === selectedVersion) ?? selectedVersionList[0]
   );
+  const selectedVersionLabel = $derived(selectedVersion || 'No builds');
+  const selectedBranchLabel = $derived(`${branch} ${selectedVersionLabel}`);
   const selectedConfigName = $derived(
     configs.find((config) => config.entry_id === selectedConfigId)?.name ?? 'Loading...'
   );
-  const versions = $derived(
-    branch === 'Release' ? ['v1.0.4', 'v1.0.3', 'v1.0.2'] : ['v1.0.5-test.1', 'v1.0.5-test.0']
-  );
+  const versions = $derived(selectedVersionList);
+  const updatedAtLabel = $derived(formatGitDate(selectedVersionData?.updated_at));
+  const changelogEntries = $derived(parseChangelog(selectedVersionData?.changelog));
+  const selectedReleaseUrl = $derived(selectedVersionData?.url ?? '');
   const appWindow = getCurrentWindow();
 
   type LauncherTheme = {
@@ -45,6 +66,11 @@
     selected_config_id: number | null;
     selected_config_name: string | null;
     configs: ConfigEntry[];
+  };
+
+  type LauncherGitMetadata = {
+    releases: LauncherVersion[];
+    nightlies: LauncherVersion[];
   };
 
   onMount(() => {
@@ -75,7 +101,7 @@
     const closeFloatingMenus = (event: MouseEvent) => {
       const target = event.target as HTMLElement;
 
-      if (target.closest('.branch-trigger, .branch-menu, .metadata-trigger, .metadata-menu')) {
+      if (target.closest('.branch-trigger, .branch-menu, .metadata-trigger, .metadata-menu, .changelog a')) {
         return;
       }
 
@@ -88,6 +114,7 @@
     window.addEventListener('mousedown', dragWindow, true);
     void loadTheme();
     void loadSettings();
+    void loadGitMetadata();
 
     const bootTimer = window.setTimeout(() => {
       showLauncher();
@@ -124,6 +151,30 @@
       selectedConfigId = settings.selected_config_id ?? settings.configs[0]?.entry_id ?? null;
     } catch (error) {
       console.warn('Failed to load launcher settings', error);
+    }
+  }
+
+  async function loadGitMetadata() {
+    try {
+      const metadata = await invoke<LauncherGitMetadata>('load_git_metadata');
+      gitMetadata = metadata;
+      selectedVersion = metadata.releases[0]?.tag ?? metadata.nightlies[0]?.tag ?? '';
+    } catch (error) {
+      console.warn('Failed to load GitHub metadata', error);
+      gitMetadata = {
+        releases: [
+          {
+            tag: 'Unavailable',
+            name: 'Unavailable',
+            changelog: 'Could not load GitHub release metadata.',
+            updated_at: '',
+            url: '',
+            assets: []
+          }
+        ],
+        nightlies: []
+      };
+      selectedVersion = 'Unavailable';
     }
   }
 
@@ -179,7 +230,7 @@
 
   function selectBranch(next: Branch) {
     branch = next;
-    selectedVersion = next === 'Release' ? 'v1.0.4' : 'v1.0.5-test.1';
+    selectedVersion = (next === 'Release' ? gitMetadata.releases : gitMetadata.nightlies)[0]?.tag ?? '';
     branchOpen = false;
   }
 
@@ -211,6 +262,8 @@
     branchOpen = false;
     launchPending = true;
     progress = 0;
+    const versionToLaunch = selectedVersion;
+    const configIdToLaunch = selectedConfigId;
 
     if (closeTimer) {
       window.clearTimeout(closeTimer);
@@ -224,26 +277,37 @@
 
       view = 'launching';
       launchTimer = undefined;
-      startLaunchProgress();
+      void startLaunchProgress(versionToLaunch, configIdToLaunch);
     }, 230);
   }
 
-  function startLaunchProgress() {
+  async function startLaunchProgress(versionToLaunch: string, configIdToLaunch: number | null) {
     const startedAt = performance.now();
+    let finished = false;
     const tick = () => {
       const elapsed = performance.now() - startedAt;
-      progress = Math.min(100, (elapsed / 1200) * 100);
+      progress = finished ? 100 : Math.min(92, 18 + (elapsed / 3200) * 74);
 
-      if (progress < 100) {
+      if (!finished) {
         requestAnimationFrame(tick);
-      } else {
-        window.setTimeout(() => {
-          void appWindow.close().catch(() => undefined);
-        }, 1800);
       }
     };
 
     requestAnimationFrame(tick);
+
+    try {
+      await invoke('download_and_launch_version', { tag: versionToLaunch, configId: configIdToLaunch });
+      finished = true;
+      progress = 100;
+      window.setTimeout(() => {
+        void appWindow.close().catch(() => undefined);
+      }, 1800);
+    } catch (error) {
+      console.warn('Failed to launch selected version', error);
+      launchPending = false;
+      view = 'details';
+      progress = 0;
+    }
   }
 
   function closeBranchFromBackdrop() {
@@ -254,6 +318,55 @@
     branchOpen = false;
     versionOpen = false;
     configOpen = false;
+  }
+
+  function formatGitDate(value: string | undefined) {
+    if (!value) {
+      return 'Unknown';
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    const day = date.getDate().toString().padStart(2, '0');
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const year = date.getFullYear();
+    const hour = date.getHours().toString().padStart(2, '0');
+    const minute = date.getMinutes().toString().padStart(2, '0');
+
+    return `${day}.${month}.${year} ${hour}:${minute}`;
+  }
+
+  function parseChangelog(value: string | undefined) {
+    const trimmed = value?.trim();
+
+    if (!trimmed) {
+      return ['No changelog provided.'];
+    }
+
+    return trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.replace(/^[-*]\s*/, '- '));
+  }
+
+  function renderMarkdownLine(value: string) {
+    return escapeHtml(value).replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer">$1</a>'
+    );
+  }
+
+  function escapeHtml(value: string) {
+    return value
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
   }
 
   function dragWindow(event: MouseEvent) {
@@ -422,14 +535,16 @@
                   {#if versionOpen}
                     <div class="metadata-menu version-menu">
                       {#each versions as version}
-                        <button class:selected={version === selectedVersion} onclick={() => selectVersion(version)}>
-                          {version}
+                        <button class:selected={version.tag === selectedVersion} onclick={() => selectVersion(version.tag)}>
+                          {version.tag}
                         </button>
+                      {:else}
+                        <button disabled>No builds</button>
                       {/each}
                     </div>
                   {/if}
                 </p>
-                <p><span class="label">Updated:</span> <span class="value">24.10.2022 02:39</span></p>
+                <p><span class="label">Updated:</span> <span class="value">{updatedAtLabel}</span></p>
                 <p class="metadata-row with-menu">
                   <span class="label">Config:</span>
                   <button
@@ -454,10 +569,19 @@
               </div>
 
               <div class="changelog">
-                <p class="date">10.10.2022 03:27</p>
-                <p>- Fixed crashes & bugs<br />- Improved overall performance</p>
-                <p class="date">07.10.2022 02:14</p>
-                <p>- Fixed crash related to config save</p>
+                <p class="date">
+                  Changelogs
+                  {#if selectedReleaseUrl}
+                    <a href={selectedReleaseUrl} target="_blank" rel="noreferrer">{selectedVersionLabel}</a>
+                  {:else}
+                    <span>{selectedVersionLabel}</span>
+                  {/if}
+                </p>
+                <p>
+                  {#each changelogEntries as entry}
+                    {@html renderMarkdownLine(entry)}<br />
+                  {/each}
+                </p>
               </div>
             </div>
 
@@ -941,8 +1065,8 @@
   }
 
   .details.launching {
-    width: 325px;
-    height: 190px;
+    width: 375px;
+    height: 250px;
     border-radius: 4px;
     background: var(--nl-block-bg-opaque);
     animation: none;
@@ -1187,15 +1311,43 @@
     color: var(--nl-active-text);
   }
 
+  .metadata-menu button:disabled {
+    color: var(--nl-disabled-text);
+    opacity: 0.58;
+    pointer-events: none;
+  }
+
   .changelog {
     max-height: 154px;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     padding-right: 8px;
     color: var(--nl-text);
+    overflow-wrap: anywhere;
     mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 22px), transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 22px), transparent 100%);
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--nl-active-text), transparent 75%) transparent;
+  }
+
+  .changelog :global(a),
+  .changelog :global(a:visited),
+  .changelog :global(a:active),
+  .changelog :global(a:focus) {
+    color: var(--nl-link);
+    cursor: default !important;
+    text-decoration: none;
+    outline: none;
+    transition: color 130ms ease-in-out, text-shadow 130ms ease-in-out;
+  }
+
+  .changelog :global(a:hover),
+  .changelog :global(a:visited:hover),
+  .changelog :global(a:active:hover),
+  .changelog :global(a:focus:hover) {
+    color: var(--nl-link-active);
+    cursor: default !important;
+    text-shadow: 0 0 10px color-mix(in srgb, var(--nl-link-active), transparent 88%);
   }
 
   .changelog::-webkit-scrollbar {
@@ -1215,6 +1367,11 @@
     color: var(--nl-active-text);
     margin-bottom: 15px;
     font-weight: 300;
+  }
+
+  .changelog .date a,
+  .changelog .date span {
+    margin-left: 4px;
   }
 
   .changelog p:not(.date) {
@@ -1386,7 +1543,7 @@
   .launch-content {
     position: absolute;
     inset: 0;
-    --launch-content-width: 220px;
+    --launch-content-width: 249px;
     z-index: 2;
     display: grid;
     place-items: center;
@@ -1415,15 +1572,17 @@
 
   .launch-content p {
     width: var(--launch-content-width);
-    margin: 18px 0 13px;
+    margin: 30px 0 16px;
     color: var(--nl-text);
     font-size: 13px;
+    white-space: nowrap;
+    justify-self: center;
     text-align: center;
   }
 
   .progress {
     width: var(--launch-content-width);
-    height: 5px;
+    height: 4px;
     overflow: hidden;
     border-radius: 999px;
     background: var(--nl-frame-bg);

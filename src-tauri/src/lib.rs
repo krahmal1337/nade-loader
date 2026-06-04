@@ -1,12 +1,31 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HWND},
+    System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE},
+    UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE},
+};
+#[cfg(windows)]
+use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
 
 use base64::Engine as _;
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/luvettee/FemboyLose/releases";
+const GITHUB_RELEASE_BY_TAG_URL: &str =
+    "https://api.github.com/repos/luvettee/FemboyLose/releases/tags";
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+const CSGO_WINDOW_CLASS: &str = "Valve001";
+const SYNCHRONIZE_ACCESS: u32 = 0x00100000;
+const WAIT_OBJECT_0: u32 = 0;
 const STYLE_ALPHA: &str = "177670";
 const STYLE_BLUE: &str = "177671";
 const STYLE_GREEN: &str = "177676";
@@ -66,6 +85,49 @@ struct ConfigEntry {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    name: Option<String>,
+    body: Option<String>,
+    prerelease: bool,
+    draft: bool,
+    published_at: Option<String>,
+    updated_at: String,
+    html_url: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LauncherGitMetadata {
+    releases: Vec<LauncherVersion>,
+    nightlies: Vec<LauncherVersion>,
+}
+
+#[derive(Debug, Serialize)]
+struct LauncherVersion {
+    tag: String,
+    name: String,
+    changelog: String,
+    updated_at: String,
+    url: String,
+    assets: Vec<LauncherAsset>,
+}
+
+#[derive(Debug, Serialize)]
+struct LauncherAsset {
+    name: String,
+    url: String,
+    size: u64,
+}
+
 #[tauri::command]
 fn load_launcher_theme() -> Result<LauncherTheme, String> {
     let cloud = nl_cloud_path()?;
@@ -99,9 +161,11 @@ fn load_launcher_theme() -> Result<LauncherTheme, String> {
         return Ok(default_theme("style not found"));
     };
 
-    let style_path = cloud
-        .join("styles")
-        .join(format!("{}_{}.style", entry.entry_id, sanitize_filename(&entry.name)));
+    let style_path = cloud.join("styles").join(format!(
+        "{}_{}.style",
+        entry.entry_id,
+        sanitize_filename(&entry.name)
+    ));
     let style_text = fs::read_to_string(&style_path)
         .map_err(|error| format!("failed to read {}: {error}", style_path.display()))?;
     let colors = decode_style_colors(&style_text)?;
@@ -165,6 +229,281 @@ fn load_launcher_settings() -> Result<LauncherSettings, String> {
     })
 }
 
+#[tauri::command]
+fn load_git_metadata() -> Result<LauncherGitMetadata, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("NeverloseTauriOfficial")
+        .build()
+        .map_err(|error| format!("failed to create GitHub client: {error}"))?;
+    let releases = client
+        .get(GITHUB_RELEASES_URL)
+        .send()
+        .map_err(|error| format!("failed to fetch GitHub releases: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("GitHub releases request failed: {error}"))?
+        .json::<Vec<GithubRelease>>()
+        .map_err(|error| format!("failed to parse GitHub releases: {error}"))?;
+
+    let mut stable = Vec::new();
+    let mut nightly = Vec::new();
+
+    for release in releases.into_iter().filter(|release| !release.draft) {
+        let version = LauncherVersion {
+            name: release.name.unwrap_or_else(|| release.tag_name.clone()),
+            tag: release.tag_name,
+            changelog: release.body.unwrap_or_default(),
+            updated_at: release.published_at.unwrap_or(release.updated_at),
+            url: release.html_url,
+            assets: release
+                .assets
+                .into_iter()
+                .map(|asset| LauncherAsset {
+                    name: asset.name,
+                    url: asset.browser_download_url,
+                    size: asset.size,
+                })
+                .collect(),
+        };
+
+        if release.prerelease {
+            nightly.push(version);
+        } else {
+            stable.push(version);
+        }
+    }
+
+    Ok(LauncherGitMetadata {
+        releases: stable,
+        nightlies: nightly,
+    })
+}
+
+#[tauri::command]
+fn download_and_launch_version(tag: String, config_id: Option<i32>) -> Result<(), String> {
+    if tag.trim().is_empty() || tag == "Unavailable" {
+        return Err("no release version is selected".to_string());
+    }
+
+    let client = github_client()?;
+    let release = client
+        .get(format!("{GITHUB_RELEASE_BY_TAG_URL}/{tag}"))
+        .send()
+        .map_err(|error| format!("failed to fetch GitHub release {tag}: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("GitHub release {tag} request failed: {error}"))?
+        .json::<GithubRelease>()
+        .map_err(|error| format!("failed to parse GitHub release {tag}: {error}"))?;
+
+    let install_dir = version_install_dir(&tag)?;
+    fs::create_dir_all(&install_dir)
+        .map_err(|error| format!("failed to create {}: {error}", install_dir.display()))?;
+
+    download_asset(&client, &release, "neverlose.dll", &install_dir)?;
+    download_asset(&client, &release, "neverlose-server.exe", &install_dir)?;
+    download_asset(&client, &release, "injector.exe", &install_dir)?;
+
+    let cloud_dir = launcher_cloud_dir()?;
+    fs::create_dir_all(&cloud_dir)
+        .map_err(|error| format!("failed to create {}: {error}", cloud_dir.display()))?;
+
+    spawn_server_hidden(
+        &install_dir.join("neverlose-server.exe"),
+        &install_dir,
+        &cloud_dir,
+        config_id,
+    )?;
+    restart_csgo()?;
+    spawn_hidden(&install_dir.join("injector.exe"), &install_dir)?;
+
+    Ok(())
+}
+
+fn github_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent("NeverloseTauriOfficial")
+        .build()
+        .map_err(|error| format!("failed to create GitHub client: {error}"))
+}
+
+fn version_install_dir(tag: &str) -> Result<PathBuf, String> {
+    let appdata =
+        std::env::var("APPDATA").map_err(|error| format!("APPDATA is not available: {error}"))?;
+    Ok(Path::new(&appdata)
+        .join("neverlose")
+        .join("bin")
+        .join(sanitize_path_segment(tag)))
+}
+
+fn launcher_cloud_dir() -> Result<PathBuf, String> {
+    if let Some(game_dir) = csgo_install_dir() {
+        return Ok(game_dir.join("nl_cloud"));
+    }
+
+    let appdata =
+        std::env::var("APPDATA").map_err(|error| format!("APPDATA is not available: {error}"))?;
+    Ok(Path::new(&appdata).join("neverlose").join("nl_cloud"))
+}
+
+#[cfg(windows)]
+fn csgo_install_dir() -> Option<PathBuf> {
+    let local_machine = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = local_machine
+        .open_subkey("SOFTWARE\\WOW6432Node\\Valve\\cs2")
+        .ok()?;
+    let install_path: String = key.get_value("installpath").ok()?;
+    let path = PathBuf::from(install_path);
+
+    path.join("csgo.exe").exists().then_some(path)
+}
+
+#[cfg(not(windows))]
+fn csgo_install_dir() -> Option<PathBuf> {
+    None
+}
+
+fn download_asset(
+    client: &reqwest::blocking::Client,
+    release: &GithubRelease,
+    asset_name: &str,
+    install_dir: &Path,
+) -> Result<(), String> {
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case(asset_name))
+        .ok_or_else(|| format!("release {} is missing {asset_name}", release.tag_name))?;
+    let target = install_dir.join(asset_name);
+    let temp = install_dir.join(format!("{asset_name}.download"));
+    let bytes = client
+        .get(&asset.browser_download_url)
+        .send()
+        .map_err(|error| format!("failed to download {asset_name}: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("download for {asset_name} failed: {error}"))?
+        .bytes()
+        .map_err(|error| format!("failed to read {asset_name}: {error}"))?;
+
+    fs::write(&temp, bytes)
+        .map_err(|error| format!("failed to write {}: {error}", temp.display()))?;
+    if target.exists() {
+        fs::remove_file(&target)
+            .map_err(|error| format!("failed to replace {}: {error}", target.display()))?;
+    }
+    fs::rename(&temp, &target)
+        .map_err(|error| format!("failed to move {} into place: {error}", target.display()))?;
+
+    Ok(())
+}
+
+fn spawn_hidden(exe: &Path, working_dir: &Path) -> Result<(), String> {
+    let mut command = Command::new(exe);
+    command.current_dir(working_dir);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
+}
+
+fn spawn_server_hidden(
+    exe: &Path,
+    working_dir: &Path,
+    cloud_dir: &Path,
+    config_id: Option<i32>,
+) -> Result<(), String> {
+    let mut command = Command::new(exe);
+    command.current_dir(working_dir);
+    command.env("NL_CLOUD_PATH", cloud_dir);
+    if let Some(config_id) = config_id {
+        command.args(["--boot-config", &config_id.to_string()]);
+    }
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
+}
+
+#[cfg(windows)]
+fn restart_csgo() -> Result<(), String> {
+    close_csgo_if_running()?;
+    let game_dir =
+        csgo_install_dir().ok_or_else(|| "failed to find CS:GO install path".to_string())?;
+    let exe = game_dir.join("csgo.exe");
+
+    Command::new(&exe)
+        .args(["-steam", "-insecure", "-novid"])
+        .current_dir(&game_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
+}
+
+#[cfg(not(windows))]
+fn restart_csgo() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn close_csgo_if_running() -> Result<(), String> {
+    let Some(window) = find_csgo_window() else {
+        return Ok(());
+    };
+
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(window, &mut process_id);
+    }
+
+    unsafe {
+        let _ = PostMessageW(window, WM_CLOSE, 0, 0);
+    }
+
+    if process_id == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(1400));
+        return Ok(());
+    }
+
+    let process = unsafe { OpenProcess(SYNCHRONIZE_ACCESS | PROCESS_TERMINATE, 0, process_id) };
+    if process.is_null() {
+        std::thread::sleep(std::time::Duration::from_millis(1400));
+        return Ok(());
+    }
+
+    let closed = unsafe { WaitForSingleObject(process, 3500) == WAIT_OBJECT_0 };
+    if !closed {
+        unsafe {
+            TerminateProcess(process, 0);
+            let _ = WaitForSingleObject(process, 2000);
+        }
+    }
+
+    unsafe {
+        CloseHandle(process);
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn find_csgo_window() -> Option<HWND> {
+    let class_name = wide_null(CSGO_WINDOW_CLASS);
+    let window = unsafe { FindWindowW(class_name.as_ptr(), std::ptr::null()) };
+    (!window.is_null()).then_some(window)
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 fn builtin_style(style_id: i32) -> Option<(&'static str, &'static str)> {
     match style_id {
         0 => Some(("Blue", BUILTIN_STYLE_BLUE)),
@@ -183,7 +522,9 @@ fn extract_style_id_from_type7(blob_b64: &str) -> Option<i32> {
         .and_then(|value| map_get(value, STYLE_SELECTION_KEY_2))
         .and_then(|value| map_get(value, STYLE_SELECTION_KEY_3))?;
 
-    selected.as_i64().and_then(|value| i32::try_from(value).ok())
+    selected
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn map_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
@@ -205,12 +546,7 @@ fn nl_cloud_path() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(path));
     }
 
-    let user_profile = std::env::var("USERPROFILE")
-        .map_err(|error| format!("USERPROFILE is not available: {error}"))?;
-    Ok(Path::new(&user_profile)
-        .join("Documents")
-        .join("neverlose")
-        .join("nl_cloud"))
+    launcher_cloud_dir()
 }
 
 fn decode_style_colors(style_text: &str) -> Result<Vec<ThemeColor>, String> {
@@ -311,37 +647,97 @@ fn opaque_color(colors: &[ThemeColor], index: usize, fallback: &str) -> String {
 fn build_launcher_variables(colors: &[ThemeColor]) -> HashMap<String, String> {
     let mut variables = HashMap::new();
 
-    variables.insert("--nl-text".to_string(), color(colors, 0, "rgba(255, 255, 255, 0.88)"));
-    variables.insert("--nl-disabled-text".to_string(), color(colors, 1, "rgba(255, 255, 255, 0.38)"));
+    variables.insert(
+        "--nl-text".to_string(),
+        color(colors, 0, "rgba(255, 255, 255, 0.88)"),
+    );
+    variables.insert(
+        "--nl-disabled-text".to_string(),
+        color(colors, 1, "rgba(255, 255, 255, 0.38)"),
+    );
     variables.insert("--nl-active-text".to_string(), color(colors, 2, "#FFFFFF"));
-    variables.insert("--nl-small-text".to_string(), color(colors, 3, "rgba(255, 255, 255, 0.575)"));
-    variables.insert("--nl-sidebar-text".to_string(), color(colors, 4, "rgba(255, 255, 255, 0.589)"));
+    variables.insert(
+        "--nl-small-text".to_string(),
+        color(colors, 3, "rgba(255, 255, 255, 0.575)"),
+    );
+    variables.insert(
+        "--nl-sidebar-text".to_string(),
+        color(colors, 4, "rgba(255, 255, 255, 0.589)"),
+    );
     variables.insert("--nl-logo".to_string(), color(colors, 5, "white"));
     variables.insert("--nl-sidebar-bg".to_string(), color(colors, 6, "#010306"));
-    variables.insert("--nl-popup-bg".to_string(), color(colors, 8, "rgba(7, 12, 19, 0.65)"));
+    variables.insert(
+        "--nl-popup-bg".to_string(),
+        color(colors, 8, "rgba(7, 12, 19, 0.65)"),
+    );
     variables.insert("--nl-main-bg".to_string(), color(colors, 9, "#010306"));
-    variables.insert("--nl-main-bg-opaque".to_string(), opaque_color(colors, 9, "#010306"));
+    variables.insert(
+        "--nl-main-bg-opaque".to_string(),
+        opaque_color(colors, 9, "#010306"),
+    );
     variables.insert("--nl-preview-bg".to_string(), color(colors, 10, "#03080f"));
-    variables.insert("--nl-border".to_string(), color(colors, 11, "rgba(255, 255, 255, 0.075)"));
+    variables.insert(
+        "--nl-border".to_string(),
+        color(colors, 11, "rgba(255, 255, 255, 0.075)"),
+    );
     variables.insert("--nl-frame-bg".to_string(), color(colors, 12, "#03080f"));
-    variables.insert("--nl-frame-active-bg".to_string(), color(colors, 13, "rgba(7, 12, 19, 0.72)"));
-    variables.insert("--nl-text-preview".to_string(), color(colors, 14, "rgba(247, 245, 255, 0.8)"));
-    variables.insert("--nl-window-title-bg".to_string(), color(colors, 15, "rgba(4, 8, 13, 0.96)"));
-    variables.insert("--nl-active-window-title".to_string(), color(colors, 16, "rgba(255, 255, 255, 0.88)"));
+    variables.insert(
+        "--nl-frame-active-bg".to_string(),
+        color(colors, 13, "rgba(7, 12, 19, 0.72)"),
+    );
+    variables.insert(
+        "--nl-text-preview".to_string(),
+        color(colors, 14, "rgba(247, 245, 255, 0.8)"),
+    );
+    variables.insert(
+        "--nl-window-title-bg".to_string(),
+        color(colors, 15, "rgba(4, 8, 13, 0.96)"),
+    );
+    variables.insert(
+        "--nl-active-window-title".to_string(),
+        color(colors, 16, "rgba(255, 255, 255, 0.88)"),
+    );
     variables.insert("--nl-spinner".to_string(), color(colors, 40, "#aab6ff"));
     variables.insert("--nl-block-bg".to_string(), color(colors, 41, "#03080f"));
-    variables.insert("--nl-block-bg-opaque".to_string(), opaque_color(colors, 41, "#03080f"));
-    variables.insert("--nl-sidebar-selection".to_string(), color(colors, 42, "rgba(255, 255, 255, 0.08)"));
-    variables.insert("--nl-logo-back".to_string(), color(colors, 44, "rgba(255, 255, 255, 0.18)"));
+    variables.insert(
+        "--nl-block-bg-opaque".to_string(),
+        opaque_color(colors, 41, "#03080f"),
+    );
+    variables.insert(
+        "--nl-sidebar-selection".to_string(),
+        color(colors, 42, "rgba(255, 255, 255, 0.08)"),
+    );
+    variables.insert(
+        "--nl-logo-back".to_string(),
+        color(colors, 44, "rgba(255, 255, 255, 0.18)"),
+    );
     variables.insert("--nl-button".to_string(), color(colors, 28, "#3f66f5"));
-    variables.insert("--nl-button-active".to_string(), color(colors, 29, "#486cee"));
-    variables.insert("--nl-button-active-text".to_string(), color(colors, 30, "rgba(255, 255, 255, 0.9)"));
+    variables.insert(
+        "--nl-button-active".to_string(),
+        color(colors, 29, "#486cee"),
+    );
+    variables.insert(
+        "--nl-button-active-text".to_string(),
+        color(colors, 30, "rgba(255, 255, 255, 0.9)"),
+    );
     variables.insert("--nl-link".to_string(), color(colors, 31, "#626be6"));
     variables.insert("--nl-link-active".to_string(), color(colors, 32, "white"));
-    variables.insert("--nl-selection".to_string(), color(colors, 34, "rgba(16, 31, 49, 0.78)"));
-    variables.insert("--nl-separator".to_string(), color(colors, 35, "rgba(255, 255, 255, 0.045)"));
-    variables.insert("--nl-shadow".to_string(), color(colors, 39, "rgba(0, 0, 0, 0.52)"));
-    variables.insert("--nl-shadow-soft".to_string(), alpha_color(colors, 39, "rgba(0, 0, 0, 0.48)", 0.48));
+    variables.insert(
+        "--nl-selection".to_string(),
+        color(colors, 34, "rgba(16, 31, 49, 0.78)"),
+    );
+    variables.insert(
+        "--nl-separator".to_string(),
+        color(colors, 35, "rgba(255, 255, 255, 0.045)"),
+    );
+    variables.insert(
+        "--nl-shadow".to_string(),
+        color(colors, 39, "rgba(0, 0, 0, 0.52)"),
+    );
+    variables.insert(
+        "--nl-shadow-soft".to_string(),
+        alpha_color(colors, 39, "rgba(0, 0, 0, 0.48)", 0.48),
+    );
 
     variables
 }
@@ -372,6 +768,15 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
+fn sanitize_path_segment(name: &str) -> String {
+    let value = sanitize_filename(name);
+    if value == "." || value == ".." {
+        "version".to_string()
+    } else {
+        value
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -379,6 +784,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_launcher_theme,
             load_launcher_settings,
+            load_git_metadata,
+            download_and_launch_version,
             minimize_main_window,
             close_main_window
         ])
