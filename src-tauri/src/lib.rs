@@ -6,12 +6,6 @@ use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, HWND},
-    System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE},
-    UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE},
-};
-#[cfg(windows)]
 use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
 
 use base64::Engine as _;
@@ -388,8 +382,8 @@ fn download_and_launch_version(
         &cloud_dir,
         config_id,
     )?;
-    restart_csgo(appid)?;
-    spawn_hidden(&install_dir.join("injector.exe"), &install_dir)?;
+    let headless_choice = if appid == 730 { 2 } else { 1 };
+    spawn_injector_headless(&install_dir.join("injector.exe"), &install_dir, headless_choice)?;
 
     Ok(())
 }
@@ -434,23 +428,6 @@ fn csgo_install_dir() -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 fn csgo_install_dir() -> Option<PathBuf> {
-    None
-}
-
-#[cfg(windows)]
-fn steam_install_dir() -> Option<PathBuf> {
-    let local_machine = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = local_machine
-        .open_subkey("SOFTWARE\\WOW6432Node\\Valve\\Steam")
-        .ok()?;
-    let install_path: String = key.get_value("InstallPath").ok()?;
-    let path = PathBuf::from(install_path);
-
-    path.join("steam.exe").exists().then_some(path)
-}
-
-#[cfg(not(windows))]
-fn steam_install_dir() -> Option<PathBuf> {
     None
 }
 
@@ -501,6 +478,20 @@ fn spawn_hidden(exe: &Path, working_dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
 }
 
+fn spawn_injector_headless(exe: &Path, working_dir: &Path, choice: i32) -> Result<(), String> {
+    let mut command = Command::new(exe);
+    command.current_dir(working_dir);
+    command.env("INJECTOR_HEADLESS", choice.to_string());
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch injector: {error}"))
+}
+
 fn spawn_server_hidden(
     exe: &Path,
     working_dir: &Path,
@@ -541,86 +532,7 @@ fn kill_background_processes() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn restart_csgo(appid: i32) -> Result<(), String> {
-    close_csgo_if_running()?;
 
-    let steam_dir =
-        steam_install_dir().ok_or_else(|| "failed to find Steam install path".to_string())?;
-    let steam = steam_dir.join("steam.exe");
-    
-    let protocol_string = match appid {
-        730 => "steam://launch/730/option1".to_string(),
-        _ => format!("steam://launch/{}/dialog", appid),
-    };
-    //fix: now doesnt need the pop up
-
-    Command::new(&steam)
-        .args([&protocol_string, "-steam", "-insecure", "-novid"])
-        .current_dir(&steam_dir)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("failed to launch {}: {error}", steam.display()))
-}
-
-#[cfg(not(windows))]
-fn restart_csgo() -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(windows)]
-fn close_csgo_if_running() -> Result<(), String> {
-    let Some(window) = find_csgo_window() else {
-        return Ok(());
-    };
-
-    let mut process_id = 0;
-    unsafe {
-        GetWindowThreadProcessId(window, &mut process_id);
-    }
-
-    unsafe {
-        let _ = PostMessageW(window, WM_CLOSE, 0, 0);
-    }
-
-    if process_id == 0 {
-        std::thread::sleep(std::time::Duration::from_millis(1400));
-        return Ok(());
-    }
-
-    let process = unsafe { OpenProcess(SYNCHRONIZE_ACCESS | PROCESS_TERMINATE, 0, process_id) };
-    if process.is_null() {
-        std::thread::sleep(std::time::Duration::from_millis(1400));
-        return Ok(());
-    }
-
-    let closed = unsafe { WaitForSingleObject(process, 3500) == WAIT_OBJECT_0 };
-    if !closed {
-        unsafe {
-            TerminateProcess(process, 0);
-            let _ = WaitForSingleObject(process, 2000);
-        }
-    }
-
-    unsafe {
-        CloseHandle(process);
-    }
-
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    Ok(())
-}
-
-#[cfg(windows)]
-fn find_csgo_window() -> Option<HWND> {
-    let class_name = wide_null(CSGO_WINDOW_CLASS);
-    let window = unsafe { FindWindowW(class_name.as_ptr(), std::ptr::null()) };
-    (!window.is_null()).then_some(window)
-}
-
-#[cfg(windows)]
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 fn builtin_style(style_id: i32) -> Option<(&'static str, &'static str)> {
     match style_id {

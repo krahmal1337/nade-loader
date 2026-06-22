@@ -53,6 +53,7 @@
   });
   let selectedVersion = $state('');
   let launchPending = $state(false);
+  let launchError = $state('');
   let progress = $state(0);
   let themeVariables = $state('');
   let launchTimer: number | undefined;
@@ -505,6 +506,7 @@
   function launch(appid: number) {
     branchOpen = false;
     launchPending = true;
+    launchError = '';
     progress = 0;
     const versionToLaunch = selectedVersion;
     const configIdToLaunch = selectedConfigId;
@@ -549,6 +551,7 @@
       }, 1800);
     } catch (error) {
       console.warn('Failed to launch selected version', error);
+      launchError = String(error);
       launchPending = false;
       view = 'details';
       progress = 0;
@@ -864,69 +867,79 @@
               <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
             </header>
 
-            <div class="detail-body">
-              <div class="metadata">
-                <div class="metadata-row with-menu">
-                  <span class="label">Branch:</span>
-                  <button
-                    class:active={versionOpen}
-                    class="metadata-trigger version-trigger"
-                    onclick={toggleVersion}
-                  >
-                    <span class="trigger-icon branch-icon-small"></span>
-                    <span>{selectedBranchLabel}</span>
+             <div class="detail-body">
+              {#if launchError}
+                <div class="launch-error" transition:fade={{ duration: 150 }}>
+                  <button aria-label="Dismiss error" class="launch-error-close" onclick={() => launchError = ''}>
+                    {@render IconClose()}
                   </button>
-                  {#if versionOpen}
-                    <div class="metadata-menu version-menu">
-                      {#each versions as version}
-                        <button class:selected={version.tag === selectedVersion} onclick={() => selectVersion(version.tag)}>
-                          {version.tag}
-                        </button>
-                      {:else}
-                        <button disabled>No builds</button>
-                      {/each}
-                    </div>
-                  {/if}
+                  <div class="launch-error-title">Launch Failed</div>
+                  <div class="launch-error-message">{launchError}</div>
                 </div>
-                <p><span class="label">Updated:</span> <span class="value">{updatedAtLabel}</span></p>
-                <div class="metadata-row with-menu">
-                  <span class="label">Config:</span>
-                  <button
-                    class:active={configOpen}
-                    class="metadata-trigger config-trigger"
-                    onclick={toggleConfig}
-                  >
-                    <span class="trigger-icon cog-icon-small">{@render IconCog()}</span>
-                    <span>{selectedConfigName}</span>
-                  </button>
-                  {#if configOpen}
-                    <div class="metadata-menu config-menu">
-                      {#each configs as config}
-                        <button class:selected={config.entry_id === selectedConfigId} onclick={() => selectConfig(config)}>
-                          {config.name}
-                        </button>
-                      {/each}
-                    </div>
-                  {/if}
+              {:else}
+                <div class="metadata">
+                  <div class="metadata-row with-menu">
+                    <span class="label">Branch:</span>
+                    <button
+                      class:active={versionOpen}
+                      class="metadata-trigger version-trigger"
+                      onclick={toggleVersion}
+                    >
+                      <span class="trigger-icon branch-icon-small"></span>
+                      <span>{selectedBranchLabel}</span>
+                    </button>
+                    {#if versionOpen}
+                      <div class="metadata-menu version-menu">
+                        {#each versions as version}
+                          <button class:selected={version.tag === selectedVersion} onclick={() => selectVersion(version.tag)}>
+                            {version.tag}
+                          </button>
+                        {:else}
+                          <button disabled>No builds</button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  <p><span class="label">Updated:</span> <span class="value">{updatedAtLabel}</span></p>
+                  <div class="metadata-row with-menu">
+                    <span class="label">Config:</span>
+                    <button
+                      class:active={configOpen}
+                      class="metadata-trigger config-trigger"
+                      onclick={toggleConfig}
+                    >
+                      <span class="trigger-icon cog-icon-small">{@render IconCog()}</span>
+                      <span>{selectedConfigName}</span>
+                    </button>
+                    {#if configOpen}
+                      <div class="metadata-menu config-menu">
+                        {#each configs as config}
+                          <button class:selected={config.entry_id === selectedConfigId} onclick={() => selectConfig(config)}>
+                            {config.name}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  <p><span class="label">Last Launch:</span> <span class="value">Just Now</span></p>
                 </div>
-                <p><span class="label">Last Launch:</span> <span class="value">Just Now</span></p>
-              </div>
 
-              <div class="changelog">
-                <p class="date">
-                  Changelogs
-                  {#if selectedReleaseUrl}
-                    <a href={selectedReleaseUrl} target="_blank" rel="noreferrer">{selectedVersionLabel}</a>
-                  {:else}
-                    <span>{selectedVersionLabel}</span>
-                  {/if}
-                </p>
-                <p>
-                  {#each changelogEntries as entry}
-                    {@html renderMarkdownLine(entry)}<br />
-                  {/each}
-                </p>
-              </div>
+                <div class="changelog">
+                  <p class="date">
+                    Changelogs
+                    {#if selectedReleaseUrl}
+                      <a href={selectedReleaseUrl} target="_blank" rel="noreferrer">{selectedVersionLabel}</a>
+                    {:else}
+                      <span>{selectedVersionLabel}</span>
+                    {/if}
+                  </p>
+                  <p>
+                    {#each changelogEntries as entry}
+                      {@html renderMarkdownLine(entry)}<br />
+                    {/each}
+                  </p>
+                </div>
+              {/if}
             </div>
 
             <footer>
@@ -1896,5 +1909,26 @@
       opacity: 1;
       transform: translate(-50%, -50%) scale(1);
     }
+  }
+
+  .launch-error {
+    @apply relative flex flex-col items-center justify-center text-center p-6 h-[215px] box-border;
+    color: #ff8d8d;
+  }
+
+  .launch-error-title {
+    @apply text-base font-bold mb-2 tracking-wide uppercase;
+  }
+
+  .launch-error-message {
+    @apply text-xs font-light leading-[1.4] overflow-y-auto max-h-[140px] px-2 text-[rgba(255,141,141,0.85)];
+  }
+
+  .launch-error-close {
+    @apply absolute right-0 top-0 grid size-6 place-items-center border-0 bg-transparent p-0 text-[var(--nl-text)] transition-[color,opacity] duration-[120ms] ease-in-out cursor-pointer;
+  }
+
+  .launch-error-close:hover {
+    color: var(--nl-active-text);
   }
 </style>
