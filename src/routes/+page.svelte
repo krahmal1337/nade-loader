@@ -6,8 +6,12 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
   type Branch = 'Release' | 'Nightly';
-  type Game = 'csgo_legacy' | 'csgo';
+  type Game = 'cs2-csgo_legacy' | 'csgo';
   type View = 'boot' | 'launcher' | 'details' | 'closingDetails' | 'launching';
+  type InstalledGames = {
+    cs2_legacy_branch: boolean;
+    csgo_standalone: boolean;
+  };
   type ConfigEntry = {
     entry_id: number;
     name: string;
@@ -32,6 +36,10 @@
 
   let view = $state<View>('boot');
   let game = $state<Game>('csgo');
+  let installedStatus = $state<InstalledGames>({
+    cs2_legacy_branch: false,
+    csgo_standalone: false,
+  });
   let branch = $state<Branch>('Release');
   let branchOpen = $state(false);
   let versionOpen = $state(false);
@@ -149,6 +157,7 @@
     void loadTheme();
     void loadSettings();
     void loadGitMetadata();
+    void detectInstalledGames();
 
     const bootTimer = window.setTimeout(() => {
       showLauncher();
@@ -163,9 +172,24 @@
     };
   });
 
+  async function detectInstalledGames() {
+    if (!hasTauriRuntime()) {
+      installedStatus = {
+        cs2_legacy_branch: true,
+        csgo_standalone: true,
+      };
+      return;
+    }
+    try {
+      installedStatus = await invoke<InstalledGames>('detect_installed_games');
+    } catch (error) {
+      console.warn('Failed to detect installed games', error);
+    }
+  }
+
   const appids: Record<Game, number> = {
       csgo: 4465480,
-      csgo_legacy: 730,
+      'cs2-csgo_legacy': 730,
   };
 
   function showLauncher() {
@@ -827,18 +851,38 @@
         <h1 data-tauri-drag-region>Subscription</h1>
         <p data-tauri-drag-region>Available subscriptions</p>
 
-        <button class="subscription-card active" onclick={() => (game = 'csgo_legacy') && openDetails()}>
+        <button
+          class="subscription-card"
+          class:active={installedStatus.cs2_legacy_branch}
+          class:disabled={!installedStatus.cs2_legacy_branch}
+          disabled={!installedStatus.cs2_legacy_branch}
+          onclick={() => (game = 'cs2-csgo_legacy') && openDetails()}
+        >
           <span>
-            <strong>CS:GO (csgo_legacy)</strong>
-            <em>Expires Never</em>
+            <strong>CS:GO (cs2-csgo_legacy)</strong>
+            {#if installedStatus.cs2_legacy_branch}
+              <em>Expires Never</em>
+            {:else}
+              <em class="not-installed-label">⚠️ Not Installed</em>
+            {/if}
           </span>
           <img class="game-icon" src="/csgo.png" alt="" draggable="false" />
         </button>
 
-        <button class="subscription-card active" onclick={() => (game = 'csgo') && openDetails()}>
+        <button
+          class="subscription-card"
+          class:active={installedStatus.csgo_standalone}
+          class:disabled={!installedStatus.csgo_standalone}
+          disabled={!installedStatus.csgo_standalone}
+          onclick={() => (game = 'csgo') && openDetails()}
+        >
           <span>
-            <strong>Counter-Strike: Global Offensive</strong>
-            <em>Expires Never</em>
+            <strong>CS:GO Standalone</strong>
+            {#if installedStatus.csgo_standalone}
+              <em>Expires Never</em>
+            {:else}
+              <em class="not-installed-label">⚠️ Not Installed</em>
+            {/if}
           </span>
           <img class="game-icon" src="/csgo.png" alt="" draggable="false" />
         </button>
@@ -859,10 +903,10 @@
           <div class="detail-content">
             <header>
               <img class="game-icon large" src="/csgo.png" alt="" draggable="false" />
-              {#if game === 'csgo_legacy'}
-                <h2>CS:GO (csgo_legacy)</h2>
+              {#if game === 'cs2-csgo_legacy'}
+                <h2>CS:GO (cs2-csgo_legacy)</h2>
               {:else}
-                <h2>Counter-Strike: Global Offensive</h2>
+                <h2>CS:GO Standalone</h2>
               {/if}
               <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
             </header>
@@ -1369,6 +1413,18 @@
   .subscription-card {
     @apply relative mb-[11px] block h-[73px] w-full overflow-hidden rounded-xl border-[0.5px] border-solid border-[var(--nl-border)] bg-[var(--nl-block-bg)] p-0 text-left;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.018);
+  }
+
+  .subscription-card.disabled {
+    opacity: 0.4;
+    cursor: not-allowed !important;
+    pointer-events: none;
+    filter: grayscale(100%);
+  }
+
+  .subscription-card em.not-installed-label {
+    color: #ff6b6b;
+    font-weight: 500;
   }
 
   .subscription-card.active {

@@ -6,7 +6,13 @@ use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
-use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+use winreg::RegKey;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HWND},
+    System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE},
+    UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE},
+};
 
 use base64::Engine as _;
 use rmpv::Value;
@@ -372,7 +378,19 @@ fn download_and_launch_version(
     download_asset(&client, &release, "neverlose-server.exe", &install_dir)?;
     download_asset(&client, &release, "injector.exe", &install_dir)?;
 
-    let cloud_dir = launcher_cloud_dir()?;
+    let game_folder_name = if appid == 730 {
+        "Counter-Strike Global Offensive"
+    } else {
+        "csgo legacy"
+    };
+
+    let game_dir = find_game_install_path(game_folder_name);
+    let cloud_dir = if let Some(ref dir) = game_dir {
+        dir.join("nl_cloud")
+    } else {
+        launcher_cloud_dir()?
+    };
+
     fs::create_dir_all(&cloud_dir)
         .map_err(|error| format!("failed to create {}: {error}", cloud_dir.display()))?;
 
@@ -382,8 +400,13 @@ fn download_and_launch_version(
         &cloud_dir,
         config_id,
     )?;
-    let headless_choice = if appid == 730 { 2 } else { 1 };
-    spawn_injector_headless(&install_dir.join("injector.exe"), &install_dir, headless_choice)?;
+    if is_legacy_version(&tag) {
+        restart_csgo(appid)?;
+        spawn_hidden(&install_dir.join("injector.exe"), &install_dir)?;
+    } else {
+        let headless_choice = if appid == 730 { 2 } else { 1 };
+        spawn_injector_headless(&install_dir.join("injector.exe"), &install_dir, headless_choice, game_dir)?;
+    }
 
     Ok(())
 }
@@ -404,31 +427,106 @@ fn version_install_dir(tag: &str) -> Result<PathBuf, String> {
         .join(sanitize_path_segment(tag)))
 }
 
+#[derive(Serialize)]
+struct InstalledGames {
+    cs2_legacy_branch: bool, // Counter-Strike Global Offensive
+    csgo_standalone: bool,  // csgo legacy
+}
+
+#[tauri::command]
+fn detect_installed_games() -> Result<InstalledGames, String> {
+    Ok(InstalledGames {
+        cs2_legacy_branch: find_game_install_path("Counter-Strike Global Offensive").is_some(),
+        csgo_standalone: find_game_install_path("csgo legacy").is_some(),
+    })
+}
+
+#[cfg(windows)]
+fn get_steam_install_path() -> Option<PathBuf> {
+    let hkcu = RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let key = hkcu.open_subkey("Software\\Valve\\Steam").ok()?;
+    let steam_path: String = key.get_value("SteamPath").ok()?;
+    Some(PathBuf::from(steam_path))
+}
+
+#[cfg(not(windows))]
+fn get_steam_install_path() -> Option<PathBuf> {
+    None
+}
+
+fn find_game_install_path(game_name: &str) -> Option<PathBuf> {
+    if let Ok(cur) = std::env::current_dir() {
+        let exe_check = cur.join("csgo.exe");
+        if exe_check.exists() {
+            return Some(cur);
+        }
+    }
+
+    let steam_path = get_steam_install_path()?;
+
+    let check_path = |lib: &Path| -> Option<PathBuf> {
+        let full_path = lib.join("steamapps").join("common").join(game_name);
+        let exe_check = full_path.join("csgo.exe");
+        if exe_check.exists() {
+            Some(full_path)
+        } else {
+            None
+        }
+    };
+
+    if let Some(path) = check_path(&steam_path) {
+        return Some(path);
+    }
+
+    let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
+    if let Ok(content) = fs::read_to_string(&vdf_path) {
+        let mut pos = 0;
+        while let Some(idx) = content[pos..].find("\"path\"") {
+            let absolute_idx = pos + idx;
+            pos = absolute_idx + 6;
+            if let Some(start_quote) = content[pos..].find('"') {
+                let start_idx = pos + start_quote + 1;
+                pos = start_idx;
+                if let Some(end_quote) = content[pos..].find('"') {
+                    let end_idx = pos + end_quote;
+                    pos = end_idx + 1;
+                    let lib_path_raw = &content[start_idx..end_idx];
+                    let lib_path_str = lib_path_raw.replace("\\\\", "\\");
+                    let lib_path = PathBuf::from(lib_path_str);
+                    if let Some(path) = check_path(&lib_path) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn launcher_cloud_dir() -> Result<PathBuf, String> {
-    if let Some(game_dir) = csgo_install_dir() {
+    if let Some(game_dir) = find_game_install_path("Counter-Strike Global Offensive") {
+        let cloud_path = game_dir.join("nl_cloud");
+        if cloud_path.exists() {
+            return Ok(cloud_path);
+        }
+    }
+    if let Some(game_dir) = find_game_install_path("csgo legacy") {
+        let cloud_path = game_dir.join("nl_cloud");
+        if cloud_path.exists() {
+            return Ok(cloud_path);
+        }
+    }
+    if let Some(game_dir) = find_game_install_path("Counter-Strike Global Offensive") {
+        return Ok(game_dir.join("nl_cloud"));
+    }
+    if let Some(game_dir) = find_game_install_path("csgo legacy") {
         return Ok(game_dir.join("nl_cloud"));
     }
 
     let appdata =
         std::env::var("APPDATA").map_err(|error| format!("APPDATA is not available: {error}"))?;
     Ok(Path::new(&appdata).join("neverlose").join("nl_cloud"))
-}
-
-#[cfg(windows)]
-fn csgo_install_dir() -> Option<PathBuf> {
-    let local_machine = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = local_machine
-        .open_subkey("SOFTWARE\\WOW6432Node\\Valve\\cs2")
-        .ok()?;
-    let install_path: String = key.get_value("installpath").ok()?;
-    let path = PathBuf::from(install_path);
-
-    path.join("csgo.exe").exists().then_some(path)
-}
-
-#[cfg(not(windows))]
-fn csgo_install_dir() -> Option<PathBuf> {
-    None
 }
 
 fn download_asset(
@@ -478,10 +576,13 @@ fn spawn_hidden(exe: &Path, working_dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to launch {}: {error}", exe.display()))
 }
 
-fn spawn_injector_headless(exe: &Path, working_dir: &Path, choice: i32) -> Result<(), String> {
+fn spawn_injector_headless(exe: &Path, working_dir: &Path, choice: i32, game_dir: Option<PathBuf>) -> Result<(), String> {
     let mut command = Command::new(exe);
     command.current_dir(working_dir);
     command.env("INJECTOR_HEADLESS", choice.to_string());
+    if let Some(dir) = game_dir {
+        command.env("INJECTOR_GAME_DIR", dir);
+    }
 
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -807,6 +908,128 @@ fn sanitize_path_segment(name: &str) -> String {
     }
 }
 
+fn is_legacy_version(tag: &str) -> bool {
+    let clean_tag = tag.trim_start_matches('v');
+    let parts: Vec<&str> = clean_tag.split('.').collect();
+    if parts.is_empty() {
+        return false;
+    }
+    if let Ok(major) = parts[0].parse::<i32>() {
+        if major < 1 {
+            return true;
+        }
+        if major == 1 && parts.len() > 1 {
+            if let Ok(minor) = parts[1].parse::<i32>() {
+                if minor < 1 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn steam_install_dir() -> Option<PathBuf> {
+    let hkcu = RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let key = hkcu.open_subkey("Software\\Valve\\Steam").ok()?;
+    let install_path: String = key.get_value("SteamPath").ok()?;
+    let path = PathBuf::from(install_path);
+
+    path.join("steam.exe").exists().then_some(path)
+}
+
+#[cfg(not(windows))]
+fn steam_install_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn restart_csgo(appid: i32) -> Result<(), String> {
+    close_csgo_if_running()?;
+
+    let steam_dir =
+        steam_install_dir().ok_or_else(|| "failed to find Steam install path".to_string())?;
+    let steam = steam_dir.join("steam.exe");
+    
+    let protocol_string = match appid {
+        730 => "steam://launch/730/option1".to_string(),
+        _ => format!("steam://launch/{}/dialog", appid),
+    };
+
+    Command::new(&steam)
+        .args([&protocol_string, "-steam", "-insecure", "-novid"])
+        .current_dir(&steam_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch {}: {error}", steam.display()))
+}
+
+#[cfg(not(windows))]
+fn restart_csgo(_appid: i32) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn close_csgo_if_running() -> Result<(), String> {
+    let Some(window) = find_csgo_window() else {
+        return Ok(());
+    };
+
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(window, &mut process_id);
+    }
+
+    unsafe {
+        let _ = PostMessageW(window, WM_CLOSE, 0, 0);
+    }
+
+    if process_id == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(1400));
+        return Ok(());
+    }
+
+    let process = unsafe { OpenProcess(SYNCHRONIZE_ACCESS | PROCESS_TERMINATE, 0, process_id) };
+    if process.is_null() {
+        std::thread::sleep(std::time::Duration::from_millis(1400));
+        return Ok(());
+    }
+
+    let closed = unsafe { WaitForSingleObject(process, 3500) == WAIT_OBJECT_0 };
+    if !closed {
+        unsafe {
+            TerminateProcess(process, 0);
+            let _ = WaitForSingleObject(process, 2000);
+        }
+    }
+
+    unsafe {
+        CloseHandle(process);
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn close_csgo_if_running() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn find_csgo_window() -> Option<HWND> {
+    let class_name = wide_null(CSGO_WINDOW_CLASS);
+    let window = unsafe { FindWindowW(class_name.as_ptr(), std::ptr::null()) };
+    (!window.is_null()).then_some(window)
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -820,6 +1043,7 @@ pub fn run() {
             minimize_main_window,
             close_main_window,
             kill_background_processes,
+            detect_installed_games,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
