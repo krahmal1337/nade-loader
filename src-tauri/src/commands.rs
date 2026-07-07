@@ -1,5 +1,4 @@
-use tauri::AppHandle;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 use crate::error::LauncherError;
 use crate::steam;
 use crate::downloader;
@@ -49,12 +48,25 @@ pub async fn load_git_metadata() -> Result<downloader::LauncherGitMetadata, Laun
 }
 
 #[tauri::command]
-pub async fn download_and_launch_version(
-    tag: String,
-    config_id: Option<i32>,
-    appid: i32,
-) -> Result<(), LauncherError> {
-    downloader::download_and_launch_version(tag, config_id, appid).await
+pub async fn prepare_version(app: AppHandle, tag: String) -> Result<String, LauncherError> {
+    let _ = app.emit("log", "downloading DLL...");
+    let result = downloader::prepare_version(tag).await;
+    let _ = app.emit("log", "DLL ready");
+    result
+}
+
+#[tauri::command]
+pub fn launch_game_process(app: AppHandle, appid: i32) -> Result<(), LauncherError> {
+    let _ = app.emit("log", &format!("launching game {}", appid));
+    steam::restart_csgo(appid)
+}
+
+#[tauri::command]
+pub async fn wait_and_inject(app: AppHandle, dll_path: String) -> Result<(), LauncherError> {
+    let _ = app.emit("log", "waiting for CSGO window...");
+    let result = downloader::wait_and_inject(dll_path).await;
+    let _ = app.emit("log", "injection complete");
+    result
 }
 
 #[tauri::command]
@@ -65,7 +77,9 @@ pub fn kill_background_processes() -> Result<(), LauncherError> {
 #[tauri::command]
 pub fn detect_installed_games() -> Result<steam::InstalledGames, LauncherError> {
     Ok(steam::InstalledGames {
-        cs2_legacy_branch: steam::find_game_install_path("Counter-Strike Global Offensive").is_some(),
-        csgo_standalone: steam::find_game_install_path("csgo legacy").is_some(),
+        cs2_legacy_branch: true,
+        csgo_standalone: true,
     })
 }
+
+

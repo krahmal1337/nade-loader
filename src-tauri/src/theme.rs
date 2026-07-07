@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+const DEFAULT_AVATAR: &[u8] = include_bytes!("../defaults/avatar.png");
 use serde::{Deserialize, Serialize};
 use base64::Engine as _;
 use rmpv::Value;
 use crate::error::LauncherError;
-use crate::steam;
 
 const STYLE_ALPHA: &str = "177670";
 const STYLE_BLUE: &str = "177671";
@@ -17,6 +17,7 @@ const STYLE_SELECTION_KEY_3: &str = "277698370";
 const BUILTIN_STYLE_BLUE: &str = include_str!("../builtin-styles/Blue.style");
 const BUILTIN_STYLE_BLACK: &str = include_str!("../builtin-styles/Black.style");
 const BUILTIN_STYLE_LIGHT: &str = include_str!("../builtin-styles/Light.style");
+const DEFAULT_STATE_JSON: &str = include_str!("../defaults/state.json");
 
 #[derive(Debug, Deserialize)]
 pub struct CloudState {
@@ -109,36 +110,7 @@ pub fn default_theme(source: &str) -> LauncherTheme {
 }
 
 pub fn nl_cloud_path() -> Result<PathBuf, LauncherError> {
-    if let Ok(path) = std::env::var("NL_CLOUD_PATH") {
-        return Ok(PathBuf::from(path));
-    }
-
-    launcher_cloud_dir()
-}
-
-pub fn launcher_cloud_dir() -> Result<PathBuf, LauncherError> {
-    if let Some(game_dir) = steam::find_game_install_path("Counter-Strike Global Offensive") {
-        let cloud_path = game_dir.join("nl_cloud");
-        if cloud_path.exists() {
-            return Ok(cloud_path);
-        }
-    }
-    if let Some(game_dir) = steam::find_game_install_path("csgo legacy") {
-        let cloud_path = game_dir.join("nl_cloud");
-        if cloud_path.exists() {
-            return Ok(cloud_path);
-        }
-    }
-    if let Some(game_dir) = steam::find_game_install_path("Counter-Strike Global Offensive") {
-        return Ok(game_dir.join("nl_cloud"));
-    }
-    if let Some(game_dir) = steam::find_game_install_path("csgo legacy") {
-        return Ok(game_dir.join("nl_cloud"));
-    }
-
-    let appdata =
-        std::env::var("APPDATA").map_err(|error| LauncherError::System(format!("APPDATA is not available: {error}")))?;
-    Ok(Path::new(&appdata).join("neverlose").join("nl_cloud"))
+    Ok(PathBuf::from(r"C:\nevernade\cloud"))
 }
 
 fn builtin_style(style_id: i32) -> Option<(&'static str, &'static str)> {
@@ -290,15 +262,6 @@ pub fn sanitize_filename(name: &str) -> String {
     }
 }
 
-pub fn sanitize_path_segment(name: &str) -> String {
-    let value = sanitize_filename(name);
-    if value == "." || value == ".." {
-        "version".to_string()
-    } else {
-        value
-    }
-}
-
 pub fn build_launcher_variables(colors: &[ThemeColor]) -> HashMap<String, String> {
     let mut variables = HashMap::new();
 
@@ -413,7 +376,17 @@ pub struct ConfigEntry {
 
 pub async fn read_launcher_settings() -> Result<LauncherSettings, LauncherError> {
     let cloud = nl_cloud_path()?;
+    tokio::fs::create_dir_all(&cloud)
+        .await
+        .map_err(|error| LauncherError::Io(format!("failed to create {}: {error}", cloud.display())))?;
+
     let state_path = cloud.join("state.json");
+    if !state_path.exists() {
+        tokio::fs::write(&state_path, DEFAULT_STATE_JSON)
+            .await
+            .map_err(|error| LauncherError::Io(format!("failed to create {}: {error}", state_path.display())))?;
+    }
+
     let state_text = tokio::fs::read_to_string(&state_path)
         .await
         .map_err(|error| LauncherError::Io(format!("failed to read {}: {error}", state_path.display())))?;
@@ -441,7 +414,9 @@ pub async fn read_launcher_settings() -> Result<LauncherSettings, LauncherError>
 async fn load_avatar_data_url(cloud: &Path) -> Result<Option<String>, LauncherError> {
     let avatar_path = cloud.join("avatar.png");
     if !avatar_path.exists() {
-        return Ok(None);
+        tokio::fs::write(&avatar_path, DEFAULT_AVATAR)
+            .await
+            .map_err(|error| LauncherError::Io(format!("failed to write default avatar: {error}")))?;
     }
 
     let bytes = tokio::fs::read(&avatar_path)

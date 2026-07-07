@@ -14,8 +14,6 @@ pub enum LauncherError {
     MessagePack(String),
     #[error("System path / segment error: {0}")]
     System(String),
-    #[error("Windows Registry error: {0}")]
-    Registry(String),
     #[error("Verification error: {0}")]
     Validation(String),
 }

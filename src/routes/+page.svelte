@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { fade, scale } from 'svelte/transition';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -30,8 +31,9 @@
     size: number;
   };
 
-  const WEBSITE_URL = 'https://gs.femboy.tw';
-  const DISCORD_URL = 'https://discord.gg/YzDpcsEhCE';
+
+  const WEBSITE_URL = 'https://krahmal1337.github.io';
+  const DISCORD_URL = 'https://discord.gg/auQ278pXXV';
   const API_DOCS_URL = 'https://docs-csgo.neverlose.cc/';
 
   let view = $state<View>('boot');
@@ -40,6 +42,7 @@
     cs2_legacy_branch: false,
     csgo_standalone: false,
   });
+  let anyInstalled = $derived(installedStatus.cs2_legacy_branch || installedStatus.csgo_standalone);
   let branch = $state<Branch>('Release');
   let branchOpen = $state(false);
   let versionOpen = $state(false);
@@ -61,11 +64,28 @@
   });
   let selectedVersion = $state('');
   let launchPending = $state(false);
+  let manualLaunch = $state(false);
   let launchError = $state('');
   let progress = $state(0);
+  let lastLaunchTime = $state<Date | null>(null);
+  let launchPhase = $state('');
   let themeVariables = $state('');
   let launchTimer: number | undefined;
   let closeTimer: number | undefined;
+  let debugOpen = $state(false);
+  let logEntries = $state<{ time: string; msg: string; type: string }[]>([]);
+
+  function logToConsole(msg: string, type: string = 'log') {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+    logEntries = [...logEntries.slice(-199), { time, msg, type }];
+  }
+
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.log = (...args) => { origLog.apply(console, args); logToConsole(args.join(' '), 'log'); };
+  console.warn = (...args) => { origWarn.apply(console, args); logToConsole(args.join(' '), 'warn'); };
+  console.error = (...args) => { origError.apply(console, args); logToConsole(args.join(' '), 'error'); };
 
   const selectedVersionList = $derived(branch === 'Release' ? gitMetadata.releases : gitMetadata.nightlies);
   const selectedVersionData = $derived(
@@ -80,6 +100,17 @@
   const updatedAtLabel = $derived(formatGitDate(selectedVersionData?.updated_at));
   const changelogEntries = $derived(parseChangelog(selectedVersionData?.changelog));
   const selectedReleaseUrl = $derived(selectedVersionData?.url ?? '');
+  const lastLaunchLabel = $derived.by(() => {
+    if (launchPhase) return launchPhase;
+    if (!lastLaunchTime) return 'Never';
+    const diff = Date.now() - lastLaunchTime.getTime();
+    if (diff < 10000) return 'Just Now';
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return sec + 's ago';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + ' min ago';
+    return lastLaunchTime.toLocaleTimeString();
+  });
   const appWindow = getOptionalCurrentWindow();
 
   type LauncherTheme = {
@@ -163,6 +194,18 @@
       showLauncher();
     }, 1000);
 
+    if (hasTauriRuntime()) {
+      const unlisten = listen<string>('log', (e) => logToConsole(e.payload, 'backend'));
+      return () => {
+        window.clearTimeout(bootTimer);
+        window.removeEventListener('contextmenu', blockContextMenu);
+        window.removeEventListener('keydown', blockDevtoolsShortcuts, true);
+        window.removeEventListener('mousedown', closeFloatingMenus, true);
+        window.removeEventListener('mousedown', dragWindow, true);
+        unlisten.then((fn) => fn());
+      };
+    }
+
     return () => {
       window.clearTimeout(bootTimer);
       window.removeEventListener('contextmenu', blockContextMenu);
@@ -236,6 +279,7 @@
 
   async function loadGitMetadata() {
     if (!hasTauriRuntime()) {
+      console.log('[ui] no Tauri runtime, using placeholder metadata');
       gitMetadata = {
         releases: [
           {
@@ -254,11 +298,13 @@
     }
 
     try {
+      console.log('[ui] loading Git metadata from backend...');
       const metadata = await invoke<LauncherGitMetadata>('load_git_metadata');
+      console.log('[ui] Git metadata loaded:', metadata.releases.length, 'releases,', metadata.nightlies.length, 'nightlies');
       gitMetadata = metadata;
       selectedVersion = metadata.releases[0]?.tag ?? metadata.nightlies[0]?.tag ?? '';
     } catch (error) {
-      console.warn('Failed to load GitHub metadata', error);
+      console.warn('[ui] Failed to load GitHub metadata', error);
       gitMetadata = {
         releases: [
           {
@@ -333,8 +379,10 @@
   }
 
   function selectBranch(next: Branch) {
+    console.log('[ui] selectBranch: ' + next);
     branch = next;
     selectedVersion = (next === 'Release' ? gitMetadata.releases : gitMetadata.nightlies)[0]?.tag ?? '';
+    console.log('[ui] selected version: ' + selectedVersion);
     branchOpen = false;
   }
 
@@ -346,6 +394,7 @@
   }
 
   function selectVersion(version: string) {
+    console.log('[ui] selectVersion: ' + version);
     selectedVersion = version;
     versionOpen = false;
   }
@@ -442,10 +491,20 @@
     const edge = Math.min(image.naturalWidth, image.naturalHeight);
     const sx = (image.naturalWidth - edge) / 2;
     const sy = (image.naturalHeight - edge) / 2;
+    const radius = 32;
     context.clearRect(0, 0, size, size);
     context.save();
     context.beginPath();
-    context.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+    context.moveTo(radius, 0);
+    context.lineTo(size - radius, 0);
+    context.quadraticCurveTo(size, 0, size, radius);
+    context.lineTo(size, size - radius);
+    context.quadraticCurveTo(size, size, size - radius, size);
+    context.lineTo(radius, size);
+    context.quadraticCurveTo(0, size, 0, size - radius);
+    context.lineTo(0, radius);
+    context.quadraticCurveTo(0, 0, radius, 0);
+    context.closePath();
     context.clip();
     context.drawImage(image, sx, sy, edge, edge, 0, 0, size, size);
     context.restore();
@@ -528,6 +587,7 @@
   }
 
   function launch(appid: number) {
+    console.log('[ui] launch requested: appid=' + appid + ', version=' + selectedVersion + ', manualLaunch=' + manualLaunch);
     branchOpen = false;
     launchPending = true;
     launchError = '';
@@ -552,32 +612,51 @@
   }
 
   async function startLaunchProgress(versionToLaunch: string, configIdToLaunch: number | null, appid: number | null) {
+    console.log('[ui] startLaunchProgress: version=' + versionToLaunch + ', appid=' + appid + ', manualLaunch=' + manualLaunch);
     const startedAt = performance.now();
     let finished = false;
     const tick = () => {
       const elapsed = performance.now() - startedAt;
       progress = finished ? 100 : Math.min(92, 18 + (elapsed / 3200) * 74);
-
-      if (!finished) {
-        requestAnimationFrame(tick);
-      }
+      if (!finished) requestAnimationFrame(tick);
     };
-
     requestAnimationFrame(tick);
 
     try {
-      await invoke('download_and_launch_version', { tag: versionToLaunch, configId: configIdToLaunch, appid });
-      // todo: wait until we see csgo.exe to determine if we're actually done
+      launchPhase = 'Downloading...';
+      console.log('[ui] prepare_version...');
+      const dllPath = await invoke<string>('prepare_version', { tag: versionToLaunch });
+      console.log('[ui] DLL ready:', dllPath);
+
+      if (manualLaunch) {
+        launchPhase = 'Launch CSGO manually...';
+        console.log('[ui] manual launch: waiting for user to start CSGO');
+      } else {
+        launchPhase = 'Launching game...';
+        console.log('[ui] launching game...');
+        await invoke('launch_game_process', { appid });
+      }
+
+      launchPhase = 'Waiting for CSGO...';
+      console.log('[ui] wait_and_inject...');
+      await invoke('wait_and_inject', { dllPath });
+      console.log('[ui] done');
+
       finished = true;
       progress = 100;
-      window.setTimeout(() => {
-        void appWindow?.close().catch(() => undefined);
-      }, 1000);
+      lastLaunchTime = new Date();
+      launchPhase = 'Done ✓';
+      window.setTimeout(() => void appWindow?.close().catch(() => undefined), 5000);
     } catch (error) {
-      console.warn('Failed to launch selected version', error);
-      launchError = String(error);
+      console.warn('[ui] launch failed:', error);
+      const msg = error instanceof Error ? error.message
+        : typeof error === 'string' ? error
+        : error && typeof error === 'object' && 'message' in error ? (error as {message: string}).message
+        : JSON.stringify(error);
+      launchError = msg.replace(/^[^:]*:\s*/, '');
       launchPending = false;
-      view = 'details';
+      launchPhase = 'Failed';
+      if (view === 'launching') view = 'closingDetails';
       progress = 0;
       await invoke('kill_background_processes');
     }
@@ -737,7 +816,7 @@
 {/snippet}
 
 <svelte:head>
-  <title>Neverlose Launcher</title>
+  <title>nadeloader | reloaded</title>
 </svelte:head>
 
 {#if branchOpen || versionOpen || configOpen || profileOpen}
@@ -761,7 +840,7 @@
     </section>
   {:else}
     <section class="launcher-view" data-tauri-drag-region aria-label="Launcher">
-      <div class="logo" data-tauri-drag-region>BS</div>
+      <div class="logo" data-tauri-drag-region>nadeloader - release</div>
 
       <nav class="side-nav" aria-label="Navigation">
         <button onclick={() => openExternal(WEBSITE_URL)}>Website</button>
@@ -848,38 +927,20 @@
       </div>
 
       <section class="subscriptions" data-tauri-drag-region aria-label="Subscriptions">
-        <h1 data-tauri-drag-region>Subscription</h1>
-        <p data-tauri-drag-region>Available subscriptions</p>
+        <h1 data-tauri-drag-region>nadeloader</h1>
+        <p data-tauri-drag-region>t.me/nademafia</p>
 
-        <button
-          class="subscription-card"
-          class:active={installedStatus.cs2_legacy_branch}
-          class:disabled={!installedStatus.cs2_legacy_branch}
-          disabled={!installedStatus.cs2_legacy_branch}
-          onclick={() => (game = 'cs2-csgo_legacy') && openDetails()}
-        >
+          <button
+            class="subscription-card"
+            class:active={anyInstalled}
+            class:disabled={!anyInstalled}
+            disabled={!anyInstalled}
+            onclick={() => { game = 'cs2-csgo_legacy'; openDetails(); }}
+          >
           <span>
-            <strong>CS:GO (cs2-csgo_legacy)</strong>
-            {#if installedStatus.cs2_legacy_branch}
-              <em>Expires Never</em>
-            {:else}
-              <em class="not-installed-label">⚠️ Not Installed</em>
-            {/if}
-          </span>
-          <img class="game-icon" src="/csgo.png" alt="" draggable="false" />
-        </button>
-
-        <button
-          class="subscription-card"
-          class:active={installedStatus.csgo_standalone}
-          class:disabled={!installedStatus.csgo_standalone}
-          disabled={!installedStatus.csgo_standalone}
-          onclick={() => (game = 'csgo') && openDetails()}
-        >
-          <span>
-            <strong>CS:GO Standalone</strong>
-            {#if installedStatus.csgo_standalone}
-              <em>Expires Never</em>
+            <strong>NeverLose</strong>
+            {#if anyInstalled}
+              <em>t.me/nademafia</em>
             {:else}
               <em class="not-installed-label">⚠️ Not Installed</em>
             {/if}
@@ -903,25 +964,24 @@
           <div class="detail-content">
             <header>
               <img class="game-icon large" src="/csgo.png" alt="" draggable="false" />
-              {#if game === 'cs2-csgo_legacy'}
-                <h2>CS:GO (cs2-csgo_legacy)</h2>
-              {:else}
-                <h2>CS:GO Standalone</h2>
-              {/if}
+              <h2>NeverNade</h2>
+              <div class="game-selector">
+                <button
+                  class="game-option"
+                  class:active={game === 'cs2-csgo_legacy'}
+                  onclick={() => game = 'cs2-csgo_legacy'}
+                >Legacy</button>
+                <button
+                  class="game-option"
+                  class:active={game === 'csgo'}
+                  onclick={() => game = 'csgo'}
+                >Standalone</button>
+              </div>
               <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
             </header>
 
              <div class="detail-body">
-              {#if launchError}
-                <div class="launch-error" transition:fade={{ duration: 150 }}>
-                  <button aria-label="Dismiss error" class="launch-error-close" onclick={() => launchError = ''}>
-                    {@render IconClose()}
-                  </button>
-                  <div class="launch-error-title">Launch Failed</div>
-                  <div class="launch-error-message">{launchError}</div>
-                </div>
-              {:else}
-                <div class="metadata">
+              <div class="metadata">
                   <div class="metadata-row with-menu">
                     <span class="label">Branch:</span>
                     <button
@@ -965,7 +1025,11 @@
                       </div>
                     {/if}
                   </div>
-                  <p><span class="label">Last Launch:</span> <span class="value">Just Now</span></p>
+                  <p><span class="label">Last Launch:</span> <span class="value">{lastLaunchLabel}</span></p>
+                  <p class="manual-metadata-row">
+                    <input type="checkbox" bind:checked={manualLaunch} disabled={launchPending} id="manual-launch" />
+                    <label for="manual-launch">manual launch</label>
+                  </p>
                 </div>
 
                 <div class="changelog">
@@ -983,7 +1047,6 @@
                     {/each}
                   </p>
                 </div>
-              {/if}
             </div>
 
             <footer>
@@ -1025,13 +1088,62 @@
 
           <div class="launch-content" aria-hidden={view !== 'launching'}>
             <img class="game-icon launch" src="/csgo.png" alt="" draggable="false" />
-            <p>The game will be launched automatically</p>
+            <div class="launch-status">
+              <span class="launch-dot"></span>
+              <span class="launch-phase">{launchPhase || 'Launching...'}</span>
+            </div>
             <div class="progress"><span style={`width: ${progress}%`}></span></div>
           </div>
         </section>
       {/if}
 
     </section>
+  {/if}
+
+  {#if launchError}
+    <button
+      class="background-dim visible"
+      aria-label="Dismiss error"
+      onclick={() => { launchError = ''; launchPhase = ''; }}
+      transition:fade={{ duration: 150 }}
+    ></button>
+    <section class="launch-error" data-no-drag aria-label="Launch error" transition:scale={{ duration: 220, start: 0.96, opacity: 0 }}>
+      <button aria-label="Dismiss error" class="launch-error-close" onclick={() => { launchError = ''; launchPhase = ''; }}>
+        {@render IconClose()}
+      </button>
+      <div class="launch-error-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="15" y1="9" x2="9" y2="15"/>
+          <line x1="9" y1="9" x2="15" y2="15"/>
+        </svg>
+      </div>
+      <div class="launch-error-title">Launch failed</div>
+      <div class="launch-error-message">{launchError}</div>
+      <button class="launch-error-dismiss" onclick={() => { launchError = ''; launchPhase = ''; }}>Dismiss</button>
+    </section>
+  {/if}
+
+  <button class="debug-toggle" onclick={() => debugOpen = !debugOpen}>
+    {debugOpen ? '×' : '$_'}
+  </button>
+
+  {#if debugOpen}
+    <div class="debug-console" transition:fade={{ duration: 120 }}>
+      <div class="debug-header">
+        <span>Debug Console</span>
+        <button onclick={() => logEntries = []}>Clear</button>
+      </div>
+      <div class="debug-body">
+        {#each logEntries as entry}
+          <p class:debug-warn={entry.type === 'warn'} class:debug-error={entry.type === 'error'} class:debug-backend={entry.type === 'backend'}>
+            <span class="debug-time">{entry.time}</span>
+            <span class="debug-type">[{entry.type}]</span>
+            <span class="debug-msg">{entry.msg}</span>
+          </p>
+        {/each}
+      </div>
+    </div>
   {/if}
 </main>
 
@@ -1205,9 +1317,45 @@
   }
 
   .logo {
-    @apply absolute left-[22px] top-[22px] text-[38px] font-black leading-none text-[var(--nl-logo)];
+    @apply absolute left-[18px] top-[22px] text-[12px] font-medium leading-none text-[var(--nl-logo)];
     font-family: "Museo Sans Local", "Museo Sans Cyrl", "Museo Sans Cyrillic", "Museo Sans", "Inter Variable", Inter, sans-serif;
     text-shadow: none;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .update-badge {
+    font-family: "Inter Variable", Inter, sans-serif;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border: 0;
+    border-radius: 4px;
+    padding: 2px 8px;
+    background: color-mix(in srgb, var(--nl-link), transparent 82%);
+    color: var(--nl-link);
+    cursor: pointer;
+    transition: background 130ms ease-in-out, color 130ms ease-in-out;
+    line-height: normal;
+    opacity: 1;
+  }
+  .update-badge:hover {
+    background: color-mix(in srgb, var(--nl-link), transparent 70%);
+  }
+  .update-badge.ready {
+    background: color-mix(in srgb, #4caf50, transparent 82%);
+    color: #4caf50;
+  }
+  .update-badge.ready:hover {
+    background: color-mix(in srgb, #4caf50, transparent 70%);
+  }
+  .update-badge:disabled {
+    cursor: default;
+    opacity: 0.6;
   }
 
   .side-nav {
@@ -1246,7 +1394,7 @@
   }
 
   .avatar {
-    @apply relative block size-10 flex-none overflow-hidden rounded-full;
+    @apply relative block size-10 flex-none overflow-hidden rounded-[10px];
     background:
       radial-gradient(circle at 50% 36%, rgba(255, 255, 255, 0.82) 0 10%, transparent 11%),
       radial-gradient(circle at 38% 50%, #efe1d6 0 13%, transparent 14%),
@@ -1263,7 +1411,7 @@
 
   .profile-popout {
     @apply absolute left-1/2 top-1/2 z-10 h-[340px] w-[460px] overflow-hidden rounded-[10px] border border-[rgba(255,255,255,0.075)];
-    background: var(--nl-block-bg-opaque);
+    background: var(--nl-main-bg-opaque);
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.018),
       0 18px 42px var(--nl-shadow-soft);
@@ -1287,7 +1435,7 @@
 
   .profile-popout-avatar::before {
     content: "";
-    @apply absolute inset-0 z-[1] rounded-full bg-black/0 transition-colors duration-150 ease-in-out;
+    @apply absolute inset-0 z-[1] rounded-[10px] bg-black/0 transition-colors duration-150 ease-in-out;
   }
 
   .profile-popout-avatar span {
@@ -1446,8 +1594,7 @@
   }
 
   .game-icon {
-    @apply pointer-events-none absolute right-2.5 top-[11px] size-[22px] rounded-[5px] object-cover;
-    box-shadow: 0 0 18px rgba(240, 139, 11, 0.2);
+    @apply pointer-events-none absolute right-3 top-1/2 size-[60px] -translate-y-1/2 rounded-[10px] object-cover;
   }
 
   .background-dim {
@@ -1460,7 +1607,11 @@
   }
 
   .details {
-    @apply absolute left-1/2 top-1/2 z-10 h-[340px] w-[460px] overflow-hidden rounded-[10px] border border-[rgba(255,255,255,0.075)] bg-[var(--nl-block-bg-opaque)];
+    @apply absolute left-1/2 top-1/2 z-10 h-[340px] w-[460px] overflow-hidden rounded-[10px] bg-[var(--nl-main-bg-opaque)];
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--nl-shadow), transparent 78%),
+      0 0 16px color-mix(in srgb, var(--nl-shadow), transparent 72%),
+      0 10px 24px rgba(0, 0, 0, 0.24);
     transform: translate(-50%, -50%);
     animation: panel-in 320ms var(--ease-smooth) both;
     transition:
@@ -1473,7 +1624,7 @@
   }
 
   .details.launching {
-    @apply h-[250px] w-[375px] rounded bg-[var(--nl-block-bg-opaque)] pointer-events-none;
+    @apply h-[250px] w-[375px] rounded bg-[var(--nl-main-bg-opaque)] pointer-events-none;
     animation: none;
   }
 
@@ -1502,11 +1653,29 @@
   }
 
   .details .large {
-    @apply left-[17px] top-[19px] size-[30px] rounded-lg;
+    @apply left-[17px] top-1/2 size-[38px] -translate-y-1/2 rounded-[10px];
   }
 
   .details h2 {
     @apply absolute left-[58px] top-1/2 m-0 -translate-y-1/2 text-lg font-medium text-[var(--nl-active-text)];
+  }
+
+  .game-selector {
+    @apply absolute right-14 top-1/2 flex -translate-y-1/2 gap-1;
+  }
+
+  .game-option {
+    @apply h-[26px] cursor-pointer rounded-md border border-[var(--nl-border)] bg-transparent px-3 py-0 text-[11px] font-medium text-[var(--nl-text)] transition-[background,color] duration-[130ms] ease-in-out;
+  }
+
+  .game-option:hover {
+    @apply text-[var(--nl-active-text)];
+    background: color-mix(in srgb, var(--nl-button-active), transparent 50%);
+  }
+
+  .game-option.active {
+    @apply border-transparent text-[var(--nl-button-active-text)];
+    background: var(--nl-button);
   }
 
   .detail-close {
@@ -1740,7 +1909,66 @@
     display: grid;
     grid-template-columns: 32px 102px;
     gap: 8px;
+    row-gap: 6px;
     align-items: center;
+  }
+
+  .manual-metadata-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    line-height: normal;
+  }
+  .manual-metadata-row input {
+    display: none;
+  }
+  .manual-metadata-row label {
+    position: relative;
+    padding-left: 34px;
+    cursor: pointer;
+    user-select: none;
+    color: var(--nl-text);
+    opacity: 0.55;
+    transition: opacity 0.15s ease;
+  }
+  .manual-metadata-row label::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 7px;
+    transition: background 0.2s ease;
+  }
+  .manual-metadata-row label::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 10px;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.5);
+    border-radius: 50%;
+    transition: left 0.2s ease, background 0.2s ease;
+  }
+  .manual-metadata-row input:checked + label {
+    opacity: 0.9;
+  }
+  .manual-metadata-row input:checked + label::before {
+    background: var(--nl-button);
+  }
+  .manual-metadata-row input:checked + label::after {
+    left: 16px;
+    background: #fff;
+  }
+  .manual-metadata-row input:disabled + label {
+    opacity: 0.25;
+    cursor: not-allowed;
   }
 
   .branch-trigger,
@@ -1880,16 +2108,28 @@
     transform-origin: center;
   }
 
-  .launch-content p {
-    @apply mt-[30px] mb-4 w-[var(--launch-content-width)] justify-self-center text-center text-[13px] text-[var(--nl-text)] whitespace-nowrap;
+  .launch-status {
+    @apply mt-[30px] mb-4 flex items-center justify-center gap-[10px] w-[var(--launch-content-width)];
+  }
+
+  .launch-dot {
+    @apply inline-block size-[7px] rounded-full bg-[var(--nl-button)];
+    animation: launch-dot-pulse 1.2s ease-in-out infinite;
+    box-shadow: 0 0 8px color-mix(in srgb, var(--nl-button), transparent 20%);
+  }
+
+  .launch-phase {
+    @apply text-[13px] font-light text-[var(--nl-text)] tracking-[0.02em] select-none;
   }
 
   .progress {
-    @apply h-1 w-[var(--launch-content-width)] overflow-hidden rounded-full bg-[var(--nl-frame-bg)];
+    @apply h-[3px] w-[var(--launch-content-width)] overflow-hidden rounded-full bg-[var(--nl-frame-bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.3)];
   }
 
   .progress span {
-    @apply block h-full rounded-[inherit] bg-[var(--nl-button)];
+    @apply block h-full rounded-[inherit];
+    background: linear-gradient(90deg, var(--nl-button), color-mix(in srgb, var(--nl-button), white 25%));
+    transition: width 180ms cubic-bezier(0.4, 0, 0.2, 1);
   }
 
   @keyframes fill {
@@ -1916,16 +2156,26 @@
     }
   }
 
+  @keyframes launch-error-icon-in {
+    from { opacity: 0; transform: scale(0.6) rotate(-10deg); }
+    to { opacity: 0.8; transform: scale(1) rotate(0deg); }
+  }
+
+  @keyframes launch-dot-pulse {
+    0%, 100% { opacity: 0.5; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1.15); }
+  }
+
   @keyframes launch-icon-pulse {
     0%,
     100% {
       opacity: 0.68;
-      filter: brightness(0.72) saturate(0.9) drop-shadow(0 0 4px rgba(240, 139, 11, 0.08));
+      filter: brightness(0.72) saturate(0.9) drop-shadow(0 0 6px color-mix(in srgb, var(--nl-button), transparent 50%));
       transform: scale(0.88);
     }
     50% {
       opacity: 1;
-      filter: brightness(1.12) saturate(1.08) drop-shadow(0 0 18px rgba(240, 139, 11, 0.34));
+      filter: brightness(1.12) saturate(1.08) drop-shadow(0 0 24px color-mix(in srgb, var(--nl-button), transparent 10%));
       transform: scale(1.08);
     }
   }
@@ -1968,23 +2218,136 @@
   }
 
   .launch-error {
-    @apply relative flex flex-col items-center justify-center text-center p-6 h-[215px] box-border;
-    color: #ff8d8d;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 20;
+    width: 320px;
+    padding: 36px 28px 28px;
+    border-radius: 10px;
+    background: var(--nl-main-bg-opaque);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, #ff5252, transparent 78%),
+      0 0 24px color-mix(in srgb, #ff5252, transparent 88%),
+      0 18px 42px var(--nl-shadow-soft);
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    box-sizing: border-box;
+  }
+
+  .launch-error-icon {
+    color: #ff5252;
+    opacity: 0.9;
+    margin-bottom: 14px;
+    animation: launch-error-icon-in 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  .launch-error-icon svg {
+    filter: drop-shadow(0 0 18px rgba(255, 82, 82, 0.35));
   }
 
   .launch-error-title {
-    @apply text-base font-bold mb-2 tracking-wide uppercase;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #ff5252;
+    margin-bottom: 10px;
+    animation: fade-in 200ms 120ms both;
   }
 
   .launch-error-message {
-    @apply text-xs font-light leading-[1.4] overflow-y-auto max-h-[140px] px-2 text-[rgba(255,141,141,0.85)];
+    font-size: 12px;
+    font-weight: 300;
+    line-height: 1.5;
+    overflow-y: auto;
+    max-height: 80px;
+    padding: 0 4px;
+    color: rgba(255, 82, 82, 0.7);
+    animation: fade-in 200ms 180ms both;
+    word-break: break-word;
+    margin-bottom: 18px;
   }
 
   .launch-error-close {
-    @apply absolute right-0 top-0 grid size-6 place-items-center border-0 bg-transparent p-0 text-[var(--nl-text)] transition-[color,opacity] duration-[120ms] ease-in-out cursor-pointer;
+    @apply absolute right-2 top-2 grid size-6 place-items-center border-0 bg-transparent p-0 text-[var(--nl-text)] opacity-30 transition-[color,opacity] duration-[120ms] ease-in-out cursor-pointer;
+  }
+  .launch-error-close:hover { opacity: 0.6; }
+
+  .launch-error-dismiss {
+    border: 0;
+    border-radius: 5px;
+    padding: 6px 20px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: rgba(255, 82, 82, 0.8);
+    background: color-mix(in srgb, #ff5252, transparent 88%);
+    cursor: pointer;
+    transition: background 130ms ease-in-out, color 130ms ease-in-out;
+    animation: fade-in 200ms 240ms both;
+  }
+  .launch-error-dismiss:hover {
+    background: color-mix(in srgb, #ff5252, transparent 76%);
+    color: #ff5252;
   }
 
-  .launch-error-close:hover {
-    color: var(--nl-active-text);
+  .debug-toggle {
+    position: fixed; bottom: 8px; right: 8px; z-index: 50;
+    display: grid; place-items: center;
+    width: 24px; height: 24px;
+    border-radius: 4px; border: 1px solid var(--nl-border);
+    background: var(--nl-frame-bg);
+    font-size: 11px; color: var(--nl-text);
+    opacity: 0.3; cursor: pointer; user-select: none;
+    font-family: monospace;
+    transition: opacity 120ms;
   }
+  .debug-toggle:hover { opacity: 0.8; }
+
+  .debug-console {
+    position: fixed; bottom: 36px; right: 8px; z-index: 50;
+    width: 420px; max-height: 260px; overflow: hidden;
+    border-radius: 4px; border: 1px solid var(--nl-border);
+    background: color-mix(in srgb, var(--nl-frame-bg), black 20%);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    backdrop-filter: blur(8px);
+  }
+
+  .debug-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--nl-border);
+    font-size: 11px; color: var(--nl-text);
+    opacity: 0.7; user-select: none;
+  }
+  .debug-header button {
+    border: 0; background: transparent; padding: 0;
+    font-size: 11px; color: var(--nl-text);
+    opacity: 0.5; cursor: pointer;
+    font-family: inherit;
+  }
+  .debug-header button:hover { opacity: 1; }
+
+  .debug-body {
+    overflow-y: auto; padding: 6px;
+    max-height: 225px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--nl-border) transparent;
+  }
+  .debug-body p {
+    margin: 0; font-size: 11px; line-height: 1.5;
+    font-family: monospace;
+    word-break: break-all;
+  }
+
+  .debug-time { opacity: 0.4; margin-right: 4px; }
+  .debug-type { opacity: 0.5; margin-right: 4px; }
+  .debug-warn .debug-msg { color: #ffb347; }
+  .debug-error .debug-msg { color: #ff6b6b; }
+  .debug-backend .debug-type { color: #6bc5ff; }
+  .debug-msg { color: var(--nl-text); }
 </style>

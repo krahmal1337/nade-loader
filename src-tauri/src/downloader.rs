@@ -1,37 +1,35 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use crate::error::LauncherError;
 use crate::steam;
-use crate::theme;
+const LOCAL_BIN_DIR: &str = "local";
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+// ─── GitHub — поменяй пользователя/репозиторий тут ─────────────────
+const GITHUB_REPO: &str = "krahmal1337/NeverNade";
 
-const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/luvettee/FemboyLose/releases";
-const GITHUB_RELEASE_BY_TAG_URL: &str =
-    "https://api.github.com/repos/luvettee/FemboyLose/releases/tags";
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-#[derive(Debug, Deserialize)]
-pub struct GithubRelease {
-    pub tag_name: String,
-    pub name: Option<String>,
-    pub body: Option<String>,
-    pub prerelease: bool,
-    pub draft: bool,
-    pub published_at: Option<String>,
-    pub updated_at: String,
-    pub html_url: String,
-    pub assets: Vec<GithubAsset>,
+fn github_releases_url() -> String {
+    format!("https://api.github.com/repos/{}/releases", GITHUB_REPO)
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GithubAsset {
-    pub name: String,
-    pub browser_download_url: String,
-    pub size: u64,
+struct GithubRelease {
+    tag_name: String,
+    name: Option<String>,
+    body: Option<String>,
+    prerelease: bool,
+    draft: bool,
+    published_at: Option<String>,
+    updated_at: String,
+    html_url: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,7 +38,7 @@ pub struct LauncherGitMetadata {
     pub nightlies: Vec<LauncherVersion>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct LauncherVersion {
     pub tag: String,
     pub name: String,
@@ -50,24 +48,54 @@ pub struct LauncherVersion {
     pub assets: Vec<LauncherAsset>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct LauncherAsset {
     pub name: String,
     pub url: String,
     pub size: u64,
 }
 
-pub fn github_client() -> Result<reqwest::Client, LauncherError> {
+pub fn bins_dir() -> Result<PathBuf, LauncherError> {
+    let p = Path::new("C:\\nevernade\\builds");
+    eprintln!("[loader] bins_dir: {}", p.display());
+    Ok(p.to_path_buf())
+}
+
+fn version_has_files(dir: &Path) -> bool {
+    dir.join("neverlose.dll").exists()
+}
+
+fn is_nightly(tag: &str) -> bool {
+    let lower = tag.to_lowercase();
+    lower.contains("test") || lower.contains("nightly") || lower.contains("beta") || lower.contains("alpha")
+}
+
+fn make_version_from_tag(tag: String, name: String, changelog: String, updated_at: String, url: String, assets: Vec<GithubAsset>) -> LauncherVersion {
+    LauncherVersion {
+        tag,
+        name,
+        changelog,
+        updated_at,
+        url,
+        assets: assets.into_iter().map(|a| LauncherAsset {
+            name: a.name,
+            url: a.browser_download_url,
+            size: a.size,
+        }).collect(),
+    }
+}
+
+fn github_client() -> Result<reqwest::Client, LauncherError> {
     reqwest::Client::builder()
         .user_agent("NeverloseTauriOfficial")
         .build()
         .map_err(|error| LauncherError::Reqwest(format!("failed to create GitHub client: {error}")))
 }
 
-pub async fn load_git_metadata() -> Result<LauncherGitMetadata, LauncherError> {
+async fn fetch_github_releases() -> Result<(Vec<LauncherVersion>, Vec<LauncherVersion>), LauncherError> {
     let client = github_client()?;
     let releases = client
-        .get(GITHUB_RELEASES_URL)
+        .get(github_releases_url())
         .send()
         .await?
         .error_for_status()?
@@ -77,185 +105,121 @@ pub async fn load_git_metadata() -> Result<LauncherGitMetadata, LauncherError> {
     let mut stable = Vec::new();
     let mut nightly = Vec::new();
 
-    for release in releases.into_iter().filter(|release| !release.draft) {
-        let version = LauncherVersion {
-            name: release.name.unwrap_or_else(|| release.tag_name.clone()),
-            tag: release.tag_name,
-            changelog: release.body.unwrap_or_default(),
-            updated_at: release.published_at.unwrap_or(release.updated_at),
-            url: release.html_url,
-            assets: release
-                .assets
-                .into_iter()
-                .map(|asset| LauncherAsset {
-                    name: asset.name,
-                    url: asset.browser_download_url,
-                    size: asset.size,
-                })
-                .collect(),
-        };
+    for release in releases.into_iter().filter(|r| !r.draft) {
+        let tag_name = release.tag_name.clone();
+        let version = make_version_from_tag(
+            release.tag_name,
+            release.name.unwrap_or_else(|| tag_name),
+            release.body.unwrap_or_default(),
+            release.published_at.unwrap_or(release.updated_at),
+            release.html_url,
+            release.assets,
+        );
 
-        if release.prerelease {
+        if release.prerelease || is_nightly(&version.tag) {
             nightly.push(version);
         } else {
             stable.push(version);
         }
     }
 
-    Ok(LauncherGitMetadata {
-        releases: stable,
-        nightlies: nightly,
-    })
+    Ok((stable, nightly))
 }
 
-pub fn version_install_dir(tag: &str) -> Result<PathBuf, LauncherError> {
-    let appdata = std::env::var("APPDATA")
-        .map_err(|error| LauncherError::System(format!("APPDATA is not available: {error}")))?;
-    Ok(Path::new(&appdata)
-        .join("neverlose")
-        .join("bin")
-        .join(theme::sanitize_path_segment(tag)))
-}
+fn scan_local_versions() -> (Vec<LauncherVersion>, Vec<LauncherVersion>) {
+    let mut releases = Vec::new();
+    let mut nightlies = Vec::new();
 
-pub async fn download_and_launch_version(
-    tag: String,
-    config_id: Option<i32>,
-    appid: i32,
-) -> Result<(), LauncherError> {
-    if tag.trim().is_empty() || tag == "Unavailable" {
-        return Err(LauncherError::Validation("no release version is selected".to_string()));
+    let bins = match bins_dir() {
+        Ok(d) => d,
+        Err(_) => return (releases, nightlies),
+    };
+
+    if !bins.exists() {
+        return (releases, nightlies);
     }
 
-    let client = github_client()?;
+    let mut dirs: Vec<String> = Vec::new();
+    if let Ok(mut entries) = std::fs::read_dir(&bins) {
+        while let Some(Ok(entry)) = entries.next() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name != LOCAL_BIN_DIR && version_has_files(&entry.path()) {
+                            dirs.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    dirs.sort_by(|a, b| b.cmp(a));
+
+    for tag in dirs {
+        let version = LauncherVersion {
+            tag: tag.clone(),
+            name: tag.clone(),
+            changelog: String::new(),
+            updated_at: String::new(),
+            url: String::new(),
+            assets: vec![
+                LauncherAsset { name: "neverlose.dll".to_string(), url: String::new(), size: 0 },
+                LauncherAsset { name: "injector.exe".to_string(), url: String::new(), size: 0 },
+            ],
+        };
+
+        if is_nightly(&tag) {
+            nightlies.push(version);
+        } else {
+            releases.push(version);
+        }
+    }
+
+    (releases, nightlies)
+}
+
+pub async fn load_git_metadata() -> Result<LauncherGitMetadata, LauncherError> {
+    eprintln!("[loader] load_git_metadata: fetching GitHub releases");
+    match fetch_github_releases().await {
+        Ok((releases, nightlies)) => {
+            eprintln!("[loader] GitHub OK: {} stable, {} nightly", releases.len(), nightlies.len());
+            return Ok(LauncherGitMetadata { releases, nightlies });
+        }
+        Err(error) => {
+            eprintln!("[loader] GitHub fetch failed, falling back to local: {error}");
+        }
+    }
+
+    let (releases, nightlies) = scan_local_versions();
+    eprintln!("[loader] local fallback: {} stable, {} nightly", releases.len(), nightlies.len());
+    Ok(LauncherGitMetadata { releases, nightlies })
+}
+
+async fn download_github_asset(client: &reqwest::Client, tag: &str, asset_name: &str, install_dir: &Path) -> Result<(), LauncherError> {
+    eprintln!("[loader] download_github_asset: fetching {} release metadata", tag);
+    let release_url = format!("https://api.github.com/repos/{}/releases/tags/{}", GITHUB_REPO, tag);
     let release = client
-        .get(format!("{GITHUB_RELEASE_BY_TAG_URL}/{tag}"))
+        .get(&release_url)
         .send()
         .await?
         .error_for_status()?
         .json::<GithubRelease>()
         .await?;
 
-    let install_dir = version_install_dir(&tag)?;
-    tokio::fs::create_dir_all(&install_dir)
-        .await
-        .map_err(|error| LauncherError::Io(format!("failed to create {}: {error}", install_dir.display())))?;
-
-    #[cfg(windows)]
-    let _ = kill_background_processes();
-
-    // Clean up any left-over .old files from previous locked-file workarounds
-    if let Ok(mut entries) = tokio::fs::read_dir(&install_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(extension) = path.extension() {
-                    if extension == "old" {
-                        let _ = tokio::fs::remove_file(&path).await;
-                    }
-                }
-            }
-        }
-    }
-
-    // Download and parse SHA256SUMS.txt if it exists as an asset
-    let mut checksums = HashMap::new();
-    if let Some(sums_asset) = release.assets.iter().find(|asset| asset.name.eq_ignore_ascii_case("SHA256SUMS.txt")) {
-        if let Ok(response) = client.get(&sums_asset.browser_download_url).send().await {
-            if let Ok(text) = response.text().await {
-                for line in text.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        let hash = parts[0].to_string().to_lowercase();
-                        let filename = parts[1].trim_start_matches('*').to_string();
-                        checksums.insert(filename, hash);
-                    }
-                }
-            }
-        }
-    }
-
-    download_asset(&client, &release, "neverlose.dll", &install_dir, &checksums).await?;
-    download_asset(&client, &release, "neverlose-server.exe", &install_dir, &checksums).await?;
-    download_asset(&client, &release, "injector.exe", &install_dir, &checksums).await?;
-
-    let game_folder_name = if appid == 730 {
-        "Counter-Strike Global Offensive"
-    } else {
-        "csgo legacy"
-    };
-
-    let game_dir = steam::find_game_install_path(game_folder_name);
-    let cloud_dir = if let Some(ref dir) = game_dir {
-        dir.join("nl_cloud")
-    } else {
-        theme::launcher_cloud_dir()?
-    };
-
-    tokio::fs::create_dir_all(&cloud_dir)
-        .await
-        .map_err(|error| LauncherError::Io(format!("failed to create {}: {error}", cloud_dir.display())))?;
-
-    spawn_server_hidden(
-        &install_dir.join("neverlose-server.exe"),
-        &install_dir,
-        &cloud_dir,
-        config_id,
-    )?;
-    // Spawn the injector directly in headless mode (it will launch csgo.exe and handle steam_appid.txt)
-    let headless_choice = if appid == 730 { 2 } else { 1 };
-    spawn_injector_headless(&install_dir.join("injector.exe"), &install_dir, headless_choice, game_dir)?;
-
-    Ok(())
-}
-
-async fn calculate_file_sha256(path: &Path) -> Result<String, LauncherError> {
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncReadExt;
-
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| LauncherError::Io(format!("failed to open file for hashing: {e}")))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .await
-            .map_err(|e| LauncherError::Io(format!("failed to read file for hashing: {e}")))?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-async fn download_asset(
-    client: &reqwest::Client,
-    release: &GithubRelease,
-    asset_name: &str,
-    install_dir: &Path,
-    checksums: &HashMap<String, String>,
-) -> Result<(), LauncherError> {
-    let target = install_dir.join(asset_name);
-
-    if target.exists() {
-        if let Some(expected_hash) = checksums.get(asset_name) {
-            if let Ok(actual_hash) = calculate_file_sha256(&target).await {
-                if actual_hash.eq_ignore_ascii_case(expected_hash) {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case(asset_name))
-        .ok_or_else(|| LauncherError::Validation(format!("release {} is missing {asset_name}", release.tag_name)))?;
-    
-    let temp = install_dir.join(format!("{asset_name}.download"));
+        .find(|a| a.name.eq_ignore_ascii_case(asset_name))
+        .ok_or_else(|| LauncherError::Validation(format!("release {} missing {}", tag, asset_name)))?;
+
+    let target = install_dir.join(asset_name);
+    if target.exists() {
+        eprintln!("[loader] {} already exists, skipping download", asset_name);
+        return Ok(());
+    }
+
+    eprintln!("[loader] downloading {} ({} bytes)...", asset_name, asset.size);
     let bytes = client
         .get(&asset.browser_download_url)
         .send()
@@ -264,41 +228,73 @@ async fn download_asset(
         .bytes()
         .await?;
 
-    tokio::fs::write(&temp, bytes)
+    eprintln!("[loader] writing {} to disk ({} bytes)", asset_name, bytes.len());
+    tokio::fs::write(&target, bytes)
         .await
-        .map_err(|error| LauncherError::Io(format!("failed to write {}: {error}", temp.display())))?;
+        .map_err(|error| LauncherError::Io(format!("failed to write {}: {error}", target.display())))?;
 
-    if let Some(expected_hash) = checksums.get(asset_name) {
-        let actual_hash = calculate_file_sha256(&temp).await?;
-        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
-            let _ = tokio::fs::remove_file(&temp).await;
-            return Err(LauncherError::Validation(format!(
-                "checksum validation failed for downloaded {asset_name} (expected {expected_hash}, got {actual_hash})"
-            )));
+    Ok(())
+}
+
+async fn wait_for_csgo_process(timeout_secs: u64) -> Result<u32, LauncherError> {
+    eprintln!("[loader] waiting for csgo window (Valve001), timeout={timeout_secs}s");
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(pid) = steam::find_csgo_pid() {
+            eprintln!("[loader] csgo process found, PID={pid}");
+            return Ok(pid);
         }
+        let elapsed = start.elapsed().as_secs();
+        if elapsed >= timeout_secs {
+            eprintln!("[loader] timed out waiting for csgo process");
+            return Err(LauncherError::System("timed out waiting for csgo process".to_string()));
+        }
+        if elapsed > 0 && elapsed % 5 == 0 {
+            eprintln!("[loader] still waiting for csgo... ({elapsed}s)");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+pub async fn prepare_version(tag: String) -> Result<String, LauncherError> {
+    eprintln!("[loader] prepare_version: tag={tag}");
+
+    if tag.trim().is_empty() || tag == "Unavailable" {
+        return Err(LauncherError::Validation("no release version is selected".to_string()));
     }
 
-    if target.exists() {
-        if let Err(_) = tokio::fs::remove_file(&target).await {
-            let backup_name = format!(
-                "{}.{}.old",
-                asset_name,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            );
-            let backup_path = install_dir.join(backup_name);
-            tokio::fs::rename(&target, &backup_path)
-                .await
-                .map_err(|error| LauncherError::Io(format!("failed to rename locked file {} to backup: {error}", target.display())))?;
-        }
+    let install_dir = bins_dir()?.join(&tag);
+    eprintln!("[loader] install_dir: {}", install_dir.display());
+
+    if !install_dir.exists() || !install_dir.join("neverlose.dll").exists() {
+        eprintln!("[loader] files not found locally, downloading from GitHub");
+        tokio::fs::create_dir_all(&install_dir)
+            .await
+            .map_err(|error| LauncherError::Io(format!("failed to create {}: {error}", install_dir.display())))?;
+
+        #[cfg(windows)]
+        let _ = kill_background_processes();
+
+        let client = github_client()?;
+        download_github_asset(&client, &tag, "neverlose.dll", &install_dir).await?;
+    } else {
+        eprintln!("[loader] DLL already cached locally");
     }
 
-    tokio::fs::rename(&temp, &target)
-        .await
-        .map_err(|error| LauncherError::Io(format!("failed to move {} into place: {error}", target.display())))?;
+    let dll_path = install_dir.join("neverlose.dll");
+    let dll_path_str = dll_path.to_str()
+        .ok_or_else(|| LauncherError::System("invalid dll path".to_string()))?
+        .to_string();
+    eprintln!("[loader] DLL ready: {dll_path_str}");
+    Ok(dll_path_str)
+}
 
+pub async fn wait_and_inject(dll_path: String) -> Result<(), LauncherError> {
+    eprintln!("[loader] wait_and_inject: dll_path={dll_path}");
+    let pid = wait_for_csgo_process(30).await?;
+    eprintln!("[loader] injecting DLL into PID {pid}");
+    steam::inject_dll(pid, &dll_path)?;
+    eprintln!("[loader] injection successful");
     Ok(())
 }
 
@@ -310,90 +306,6 @@ pub fn kill_background_processes() -> Result<(), LauncherError> {
             .spawn()
             .map(|_| ())
             .map_err(|error| LauncherError::System(format!("failed to kill injector: {error}")))?;
-
-        Command::new("taskkill")
-            .args(["/im", "neverlose-server.exe", "/f"])
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| LauncherError::System(format!("failed to kill neverlose server: {error}")))?;
     }
     Ok(())
-}
-
-fn spawn_hidden(exe: &Path, working_dir: &Path) -> Result<(), LauncherError> {
-    let mut command = Command::new(exe);
-    command.current_dir(working_dir);
-
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| LauncherError::System(format!("failed to launch {}: {error}", exe.display())))
-}
-
-fn spawn_injector_headless(
-    exe: &Path,
-    working_dir: &Path,
-    choice: i32,
-    game_dir: Option<PathBuf>,
-) -> Result<(), LauncherError> {
-    let mut command = Command::new(exe);
-    command.current_dir(working_dir);
-    command.env("INJECTOR_HEADLESS", choice.to_string());
-    if let Some(dir) = game_dir {
-        command.env("INJECTOR_GAME_DIR", dir);
-    }
-
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| LauncherError::System(format!("failed to launch injector: {error}")))
-}
-
-fn spawn_server_hidden(
-    exe: &Path,
-    working_dir: &Path,
-    cloud_dir: &Path,
-    config_id: Option<i32>,
-) -> Result<(), LauncherError> {
-    let mut command = Command::new(exe);
-    command.current_dir(working_dir);
-    command.env("NL_CLOUD_PATH", cloud_dir);
-    if let Some(config_id) = config_id {
-        command.args(["--boot-config", &config_id.to_string()]);
-    }
-
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| LauncherError::System(format!("failed to launch {}: {error}", exe.display())))
-}
-
-pub fn is_legacy_version(tag: &str) -> bool {
-    let clean_tag = tag.trim_start_matches('v');
-    let parts: Vec<&str> = clean_tag.split('.').collect();
-    if parts.is_empty() {
-        return false;
-    }
-    if let Ok(major) = parts[0].parse::<i32>() {
-        if major < 1 {
-            return true;
-        }
-        if major == 1 && parts.len() > 1 {
-            if let Ok(minor) = parts[1].parse::<i32>() {
-                if minor < 1 {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
