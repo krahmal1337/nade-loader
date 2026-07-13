@@ -1033,7 +1033,7 @@
           <span>
             <strong>Skeet</strong>
             {#if anyInstalled}
-              <em>skeet skeet n1 cheat</em>
+              <em>Get good. Get gamesense.</em>
             {:else}
               <em class="not-installed-label">⚠️ Not Installed</em>
             {/if}
