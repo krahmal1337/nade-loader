@@ -1,6 +1,5 @@
 use std::ffi::CString;
 use std::path::PathBuf;
-use std::process::Command;
 use crate::error::LauncherError;
 
 #[cfg(windows)]
@@ -9,7 +8,8 @@ use winreg::RegKey;
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, HWND},
     System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE},
-    UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE},
+    UI::Shell::ShellExecuteA,
+    UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE, SW_HIDE},
 };
 
 const CSGO_WINDOW_CLASS: &str = "Valve001";
@@ -67,21 +67,25 @@ pub fn steam_install_dir() -> Option<PathBuf> {
 pub fn restart_csgo(appid: i32) -> Result<(), LauncherError> {
     close_csgo_if_running()?;
 
-    let steam_dir =
-        steam_install_dir().ok_or_else(|| LauncherError::System("failed to find Steam install path".to_string()))?;
-    let steam = steam_dir.join("steam.exe");
-    
     let protocol_string = match appid {
-        730 => "steam://launch/730//-beta%20csgo_legacy".to_string(),
+        730 => "steam://launch/730/option2".to_string(),
         _ => format!("steam://launch/{}/dialog", appid),
     };
 
-    Command::new(&steam)
-        .args([&protocol_string, "-steam", "-insecure", "-novid"])
-        .current_dir(&steam_dir)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| LauncherError::System(format!("failed to launch {}: {error}", steam.display())))
+    let url = CString::new(protocol_string)
+        .map_err(|_| LauncherError::System("invalid steam URL".to_string()))?;
+
+    unsafe {
+        ShellExecuteA(
+            std::ptr::null_mut(),
+            windows_sys::core::s!("open"),
+            url.as_ptr() as *const u8,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            SW_HIDE,
+        );
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
