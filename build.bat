@@ -7,7 +7,8 @@ if not %errorlevel%==0 (
     echo.
 )
 
-bun tauri build
+bun install >nul 2>&1
+bun run tauri build
 if not %errorlevel%==0 (
     echo.
     echo [FAIL] Build failed.

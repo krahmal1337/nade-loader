@@ -198,12 +198,13 @@
     void loadSettings();
     void detectInstalledGames();
 
-    const metadataPromise = Promise.all([
-      loadGitMetadataFor('neverlose').catch(() => {}),
-      loadGitMetadataFor('skeet').catch(() => {}),
-    ]);
-
-    metadataPromise.finally(() => showLauncher());
+    setTimeout(async () => {
+      await Promise.all([
+        loadGitMetadataFor('neverlose').catch(() => {}),
+        loadGitMetadataFor('skeet').catch(() => {}),
+      ]);
+      showLauncher();
+    }, 1500);
 
     if (hasTauriRuntime()) {
       const unlisten = listen<string>('log', (e) => logToConsole(e.payload, 'backend'));
