@@ -4,13 +4,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::LauncherError;
 use crate::steam;
 const LOCAL_BIN_DIR: &str = "local";
+const SKEET_DLL_URL: &str = "https://github.com/krahmal1337/otherstuff/releases/download/release/skeet.dll";
 
-// ─── GitHub — поменяй пользователя/репозиторий тут ─────────────────
-const GITHUB_REPO: &str = "krahmal1337/NeverNade";
-
-fn github_releases_url() -> String {
-    format!("https://api.github.com/repos/{}/releases", GITHUB_REPO)
-}
+const GITHUB_REPO_NL: &str = "krahmal1337/NeverNade";
+const GITHUB_REPO_SKEET: &str = "krahmal1337/otherstuff";
 
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
@@ -61,8 +58,12 @@ pub fn bins_dir() -> Result<PathBuf, LauncherError> {
     Ok(p.to_path_buf())
 }
 
-fn version_has_files(dir: &Path) -> bool {
-    dir.join("neverlose.dll").exists()
+fn version_has_files(dir: &Path, dll_name: &str) -> bool {
+    dir.join(dll_name).exists()
+}
+
+fn is_skeet(tag: &str) -> bool {
+    tag.to_lowercase().contains("skeet")
 }
 
 fn is_nightly(tag: &str) -> bool {
@@ -92,10 +93,11 @@ fn github_client() -> Result<reqwest::Client, LauncherError> {
         .map_err(|error| LauncherError::Reqwest(format!("failed to create GitHub client: {error}")))
 }
 
-async fn fetch_github_releases() -> Result<(Vec<LauncherVersion>, Vec<LauncherVersion>), LauncherError> {
+async fn fetch_github_releases(repo: &str) -> Result<(Vec<LauncherVersion>, Vec<LauncherVersion>), LauncherError> {
+    let url = format!("https://api.github.com/repos/{repo}/releases");
     let client = github_client()?;
     let releases = client
-        .get(github_releases_url())
+        .get(&url)
         .send()
         .await?
         .error_for_status()?
@@ -105,7 +107,8 @@ async fn fetch_github_releases() -> Result<(Vec<LauncherVersion>, Vec<LauncherVe
     let mut stable = Vec::new();
     let mut nightly = Vec::new();
 
-    for release in releases.into_iter().filter(|r| !r.draft) {
+    let is_nl_repo = repo == GITHUB_REPO_NL;
+    for release in releases.into_iter().filter(|r| !r.draft && (!is_nl_repo || !is_skeet(&r.tag_name))) {
         let tag_name = release.tag_name.clone();
         let version = make_version_from_tag(
             release.tag_name,
@@ -145,7 +148,7 @@ fn scan_local_versions() -> (Vec<LauncherVersion>, Vec<LauncherVersion>) {
             if let Ok(metadata) = entry.metadata() {
                 if metadata.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
-                        if name != LOCAL_BIN_DIR && version_has_files(&entry.path()) {
+                        if name != LOCAL_BIN_DIR && !is_skeet(name) && (version_has_files(&entry.path(), "neverlose.dll") || version_has_files(&entry.path(), "skeet.dll")) {
                             dirs.push(name.to_string());
                         }
                     }
@@ -179,9 +182,10 @@ fn scan_local_versions() -> (Vec<LauncherVersion>, Vec<LauncherVersion>) {
     (releases, nightlies)
 }
 
-pub async fn load_git_metadata() -> Result<LauncherGitMetadata, LauncherError> {
-    eprintln!("[loader] load_git_metadata: fetching GitHub releases");
-    match fetch_github_releases().await {
+pub async fn load_git_metadata(product: &str) -> Result<LauncherGitMetadata, LauncherError> {
+    let repo = if product == "skeet" { GITHUB_REPO_SKEET } else { GITHUB_REPO_NL };
+    eprintln!("[loader] load_git_metadata: fetching releases from {repo}");
+    match fetch_github_releases(repo).await {
         Ok((releases, nightlies)) => {
             eprintln!("[loader] GitHub OK: {} stable, {} nightly", releases.len(), nightlies.len());
             return Ok(LauncherGitMetadata { releases, nightlies });
@@ -196,9 +200,9 @@ pub async fn load_git_metadata() -> Result<LauncherGitMetadata, LauncherError> {
     Ok(LauncherGitMetadata { releases, nightlies })
 }
 
-async fn download_github_asset(client: &reqwest::Client, tag: &str, asset_name: &str, install_dir: &Path) -> Result<(), LauncherError> {
-    eprintln!("[loader] download_github_asset: fetching {} release metadata", tag);
-    let release_url = format!("https://api.github.com/repos/{}/releases/tags/{}", GITHUB_REPO, tag);
+async fn download_github_asset(client: &reqwest::Client, repo: &str, tag: &str, asset_name: &str, install_dir: &Path) -> Result<(), LauncherError> {
+    eprintln!("[loader] download_github_asset: fetching {tag} release metadata from {repo}");
+    let release_url = format!("https://api.github.com/repos/{repo}/releases/tags/{tag}");
     let release = client
         .get(&release_url)
         .send()
@@ -211,7 +215,7 @@ async fn download_github_asset(client: &reqwest::Client, tag: &str, asset_name: 
         .assets
         .iter()
         .find(|a| a.name.eq_ignore_ascii_case(asset_name))
-        .ok_or_else(|| LauncherError::Validation(format!("release {} missing {}", tag, asset_name)))?;
+        .ok_or_else(|| LauncherError::Validation(format!("release {tag} missing {asset_name}")))?;
 
     let target = install_dir.join(asset_name);
     if target.exists() {
@@ -256,8 +260,32 @@ async fn wait_for_csgo_process(timeout_secs: u64) -> Result<u32, LauncherError> 
     }
 }
 
-pub async fn prepare_version(tag: String) -> Result<String, LauncherError> {
-    eprintln!("[loader] prepare_version: tag={tag}");
+async fn download_skeet_dll(client: &reqwest::Client, install_dir: &Path) -> Result<(), LauncherError> {
+    let target = install_dir.join("skeet.dll");
+    if target.exists() {
+        eprintln!("[loader] skeet.dll already cached, skipping download");
+        return Ok(());
+    }
+
+    eprintln!("[loader] downloading skeet.dll from {SKEET_DLL_URL}");
+    let bytes = client
+        .get(SKEET_DLL_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    eprintln!("[loader] writing skeet.dll to disk ({} bytes)", bytes.len());
+    tokio::fs::write(&target, bytes)
+        .await
+        .map_err(|error| LauncherError::Io(format!("failed to write skeet.dll: {error}")))?;
+
+    Ok(())
+}
+
+pub async fn prepare_version(tag: String, dll_name: String) -> Result<String, LauncherError> {
+    eprintln!("[loader] prepare_version: tag={tag}, dll={dll_name}");
 
     if tag.trim().is_empty() || tag == "Unavailable" {
         return Err(LauncherError::Validation("no release version is selected".to_string()));
@@ -266,7 +294,7 @@ pub async fn prepare_version(tag: String) -> Result<String, LauncherError> {
     let install_dir = bins_dir()?.join(&tag);
     eprintln!("[loader] install_dir: {}", install_dir.display());
 
-    if !install_dir.exists() || !install_dir.join("neverlose.dll").exists() {
+    if !install_dir.exists() || !install_dir.join(&dll_name).exists() {
         eprintln!("[loader] files not found locally, downloading from GitHub");
         tokio::fs::create_dir_all(&install_dir)
             .await
@@ -276,12 +304,16 @@ pub async fn prepare_version(tag: String) -> Result<String, LauncherError> {
         let _ = kill_background_processes();
 
         let client = github_client()?;
-        download_github_asset(&client, &tag, "neverlose.dll", &install_dir).await?;
+        if dll_name == "skeet.dll" {
+            download_skeet_dll(&client, &install_dir).await?;
+        } else {
+            download_github_asset(&client, GITHUB_REPO_NL, &tag, &dll_name, &install_dir).await?;
+        }
     } else {
         eprintln!("[loader] DLL already cached locally");
     }
 
-    let dll_path = install_dir.join("neverlose.dll");
+    let dll_path = install_dir.join(&dll_name);
     let dll_path_str = dll_path.to_str()
         .ok_or_else(|| LauncherError::System("invalid dll path".to_string()))?
         .to_string();
@@ -289,11 +321,11 @@ pub async fn prepare_version(tag: String) -> Result<String, LauncherError> {
     Ok(dll_path_str)
 }
 
-pub async fn wait_and_inject(dll_path: String) -> Result<(), LauncherError> {
-    eprintln!("[loader] wait_and_inject: dll_path={dll_path}");
+pub async fn wait_and_inject(dll_path: String, dll_name: String) -> Result<(), LauncherError> {
+    eprintln!("[loader] wait_and_inject: dll_path={dll_path}, dll_name={dll_name}");
     let pid = wait_for_csgo_process(30).await?;
     eprintln!("[loader] injecting DLL into PID {pid}");
-    steam::inject_dll(pid, &dll_path)?;
+    steam::inject_dll(pid, &dll_path, dll_name == "skeet.dll")?;
     eprintln!("[loader] injection successful");
     Ok(())
 }

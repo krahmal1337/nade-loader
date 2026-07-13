@@ -43,14 +43,14 @@ pub async fn save_launcher_profile(
 }
 
 #[tauri::command]
-pub async fn load_git_metadata() -> Result<downloader::LauncherGitMetadata, LauncherError> {
-    downloader::load_git_metadata().await
+pub async fn load_git_metadata(product: String) -> Result<downloader::LauncherGitMetadata, LauncherError> {
+    downloader::load_git_metadata(&product).await
 }
 
 #[tauri::command]
-pub async fn prepare_version(app: AppHandle, tag: String) -> Result<String, LauncherError> {
+pub async fn prepare_version(app: AppHandle, tag: String, dll_name: String) -> Result<String, LauncherError> {
     let _ = app.emit("log", "downloading DLL...");
-    let result = downloader::prepare_version(tag).await;
+    let result = downloader::prepare_version(tag, dll_name).await;
     let _ = app.emit("log", "DLL ready");
     result
 }
@@ -62,9 +62,9 @@ pub fn launch_game_process(app: AppHandle, appid: i32) -> Result<(), LauncherErr
 }
 
 #[tauri::command]
-pub async fn wait_and_inject(app: AppHandle, dll_path: String) -> Result<(), LauncherError> {
+pub async fn wait_and_inject(app: AppHandle, dll_path: String, dll_name: String) -> Result<(), LauncherError> {
     let _ = app.emit("log", "waiting for CSGO window...");
-    let result = downloader::wait_and_inject(dll_path).await;
+    let result = downloader::wait_and_inject(dll_path, dll_name).await;
     let _ = app.emit("log", "injection complete");
     result
 }

@@ -9,6 +9,7 @@
   type Branch = 'Release' | 'Nightly';
   type Game = 'cs2-csgo_legacy' | 'csgo';
   type View = 'boot' | 'launcher' | 'details' | 'closingDetails' | 'launching';
+  type Product = 'neverlose' | 'skeet';
   type InstalledGames = {
     cs2_legacy_branch: boolean;
     csgo_standalone: boolean;
@@ -33,11 +34,12 @@
 
 
   const WEBSITE_URL = 'https://krahmal1337.github.io';
-  const DISCORD_URL = 'https://discord.gg/auQ278pXXV';
+  const DISCORD_URL = 'https://discord.gg/n8EAhu3kcD';
   const API_DOCS_URL = 'https://docs-csgo.neverlose.cc/';
 
   let view = $state<View>('boot');
   let game = $state<Game>('csgo');
+  let product = $state<Product>('neverlose');
   let installedStatus = $state<InstalledGames>({
     cs2_legacy_branch: false,
     csgo_standalone: false,
@@ -58,11 +60,18 @@
   let avatarInput = $state<HTMLInputElement | null>(null);
   let configs = $state<ConfigEntry[]>([]);
   let selectedConfigId = $state<number | null>(null);
-  let gitMetadata = $state<LauncherGitMetadata>({
+  let nlGitMetadata = $state<LauncherGitMetadata>({
     releases: [],
     nightlies: []
   });
-  let selectedVersion = $state('');
+  let skeetGitMetadata = $state<LauncherGitMetadata>({
+    releases: [],
+    nightlies: []
+  });
+  let gitMetadata = $derived(product === 'skeet' ? skeetGitMetadata : nlGitMetadata);
+  let nlSelectedVersion = $state('');
+  let skeetSelectedVersion = $state('');
+  let selectedVersion = $derived(product === 'skeet' ? skeetSelectedVersion : nlSelectedVersion);
   let launchPending = $state(false);
   let manualLaunch = $state(false);
   let launchError = $state('');
@@ -187,7 +196,8 @@
     window.addEventListener('mousedown', dragWindow, true);
     void loadTheme();
     void loadSettings();
-    void loadGitMetadata();
+    void loadGitMetadataFor('neverlose');
+    void loadGitMetadataFor('skeet');
     void detectInstalledGames();
 
     const bootTimer = window.setTimeout(() => {
@@ -277,10 +287,25 @@
     selectedConfigId = settings.selected_config_id ?? settings.configs[0]?.entry_id ?? null;
   }
 
-  async function loadGitMetadata() {
+  async function loadGitMetadataFor(product: Product) {
+    const setMetadata = (data: LauncherGitMetadata) => {
+      if (product === 'skeet') {
+        skeetGitMetadata = data;
+      } else {
+        nlGitMetadata = data;
+      }
+    };
+    const setVersion = (v: string) => {
+      if (product === 'skeet') {
+        skeetSelectedVersion = v;
+      } else {
+        nlSelectedVersion = v;
+      }
+    };
+
     if (!hasTauriRuntime()) {
       console.log('[ui] no Tauri runtime, using placeholder metadata');
-      gitMetadata = {
+      setMetadata({
         releases: [
           {
             tag: 'Unavailable',
@@ -292,20 +317,20 @@
           }
         ],
         nightlies: []
-      };
-      selectedVersion = 'Unavailable';
+      });
+      setVersion('Unavailable');
       return;
     }
 
     try {
-      console.log('[ui] loading Git metadata from backend...');
-      const metadata = await invoke<LauncherGitMetadata>('load_git_metadata');
+      console.log('[ui] loading Git metadata from backend for', product);
+      const metadata = await invoke<LauncherGitMetadata>('load_git_metadata', { product });
       console.log('[ui] Git metadata loaded:', metadata.releases.length, 'releases,', metadata.nightlies.length, 'nightlies');
-      gitMetadata = metadata;
-      selectedVersion = metadata.releases[0]?.tag ?? metadata.nightlies[0]?.tag ?? '';
+      setMetadata(metadata);
+      setVersion(metadata.releases[0]?.tag ?? metadata.nightlies[0]?.tag ?? '');
     } catch (error) {
       console.warn('[ui] Failed to load GitHub metadata', error);
-      gitMetadata = {
+      setMetadata({
         releases: [
           {
             tag: 'Unavailable',
@@ -317,8 +342,8 @@
           }
         ],
         nightlies: []
-      };
-      selectedVersion = 'Unavailable';
+      });
+      setVersion('Unavailable');
     }
   }
 
@@ -341,11 +366,21 @@
   }
 
   function openDetails() {
-    view = 'details';
     branchOpen = false;
     versionOpen = false;
     configOpen = false;
     launchPending = false;
+    if (product === 'skeet') {
+      branch = 'Release';
+      if (!skeetSelectedVersion) {
+        skeetSelectedVersion = skeetGitMetadata.releases[0]?.tag ?? '';
+      }
+    } else {
+      if (!nlSelectedVersion) {
+        nlSelectedVersion = nlGitMetadata.releases[0]?.tag ?? '';
+      }
+    }
+    view = 'details';
   }
 
   function closeDetails() {
@@ -379,10 +414,15 @@
   }
 
   function selectBranch(next: Branch) {
+    if (product === 'skeet' && next === 'Nightly') return;
     console.log('[ui] selectBranch: ' + next);
     branch = next;
-    selectedVersion = (next === 'Release' ? gitMetadata.releases : gitMetadata.nightlies)[0]?.tag ?? '';
-    console.log('[ui] selected version: ' + selectedVersion);
+    const tag = (next === 'Release' ? gitMetadata.releases : gitMetadata.nightlies)[0]?.tag ?? '';
+    if (product === 'skeet') {
+      skeetSelectedVersion = tag;
+    } else {
+      nlSelectedVersion = tag;
+    }
     branchOpen = false;
   }
 
@@ -395,7 +435,11 @@
 
   function selectVersion(version: string) {
     console.log('[ui] selectVersion: ' + version);
-    selectedVersion = version;
+    if (product === 'skeet') {
+      skeetSelectedVersion = version;
+    } else {
+      nlSelectedVersion = version;
+    }
     versionOpen = false;
   }
 
@@ -594,6 +638,7 @@
     progress = 0;
     const versionToLaunch = selectedVersion;
     const configIdToLaunch = selectedConfigId;
+    const dllNameToUse = product === 'skeet' ? 'skeet.dll' : 'neverlose.dll';
 
     if (closeTimer) {
       window.clearTimeout(closeTimer);
@@ -607,12 +652,12 @@
 
       view = 'launching';
       launchTimer = undefined;
-      void startLaunchProgress(versionToLaunch, configIdToLaunch, appid);
+      void startLaunchProgress(versionToLaunch, configIdToLaunch, appid, dllNameToUse);
     }, 230);
   }
 
-  async function startLaunchProgress(versionToLaunch: string, configIdToLaunch: number | null, appid: number | null) {
-    console.log('[ui] startLaunchProgress: version=' + versionToLaunch + ', appid=' + appid + ', manualLaunch=' + manualLaunch);
+  async function startLaunchProgress(versionToLaunch: string, configIdToLaunch: number | null, appid: number | null, dllName: string) {
+    console.log('[ui] startLaunchProgress: version=' + versionToLaunch + ', appid=' + appid + ', manualLaunch=' + manualLaunch + ', dll=' + dllName);
     const startedAt = performance.now();
     let finished = false;
     const tick = () => {
@@ -625,7 +670,7 @@
     try {
       launchPhase = 'Downloading...';
       console.log('[ui] prepare_version...');
-      const dllPath = await invoke<string>('prepare_version', { tag: versionToLaunch });
+      const dllPath = await invoke<string>('prepare_version', { tag: versionToLaunch, dllName: dllName });
       console.log('[ui] DLL ready:', dllPath);
 
       if (manualLaunch) {
@@ -639,7 +684,7 @@
 
       launchPhase = 'Waiting for CSGO...';
       console.log('[ui] wait_and_inject...');
-      await invoke('wait_and_inject', { dllPath });
+      await invoke('wait_and_inject', { dllPath: dllPath, dllName: dllName });
       console.log('[ui] done');
 
       finished = true;
@@ -659,6 +704,7 @@
       if (view === 'launching') view = 'closingDetails';
       progress = 0;
       await invoke('kill_background_processes');
+      window.setTimeout(() => void invoke('close_main_window').catch(() => undefined), 5000);
     }
   }
 
@@ -830,32 +876,62 @@
   data-tauri-drag-region
   style={themeVariables}
 >
-  {#if view === 'boot'}
-    <section class="boot-view" data-tauri-drag-region aria-label="Loading">
+  <section class="boot-view" class:hidden={view !== 'boot'} data-tauri-drag-region aria-label="Loading">
+    <div class="boot-middle">
       <div class="boot-spinner">
         <svg viewBox="0 0 48 48" aria-hidden="true">
           <circle cx="24" cy="24" r="17"></circle>
         </svg>
       </div>
-    </section>
-  {:else}
-    <section class="launcher-view" data-tauri-drag-region aria-label="Launcher">
-      <div class="logo" data-tauri-drag-region>nadeloader - release</div>
+    </div>
+  </section>
+  <section class="launcher-view" class:visible={view !== 'boot'} data-tauri-drag-region aria-label="Launcher">
+    <div class="logo" data-tauri-drag-region>
+      <svg class="logo-icon" viewBox="0 0 512 512" fill="none" aria-label="Nadeloader">
+        <path d="M256 126 L176 220 L256 268 L336 220 Z" fill="url(#lg1)"/>
+        <path d="M256 126 L256 268 L336 220 Z" fill="url(#lg2)"/>
+        <path d="M176 220 L256 268 L256 396 L216 270 Z" fill="url(#lg3)"/>
+        <path d="M256 268 L336 220 L256 396 L296 270 Z" fill="url(#lg4)"/>
+        <path d="M256 126 L176 220 L256 268 Z" fill="url(#lg5)" opacity="0.15"/>
+        <defs>
+          <linearGradient id="lg1" x1="256" y1="126" x2="176" y2="268">
+            <stop offset="0%" stop-color="#f9a8d4"/>
+            <stop offset="100%" stop-color="#f472b6"/>
+          </linearGradient>
+          <linearGradient id="lg2" x1="256" y1="126" x2="336" y2="268">
+            <stop offset="0%" stop-color="#f472b6"/>
+            <stop offset="100%" stop-color="#ec4899"/>
+          </linearGradient>
+          <linearGradient id="lg3" x1="176" y1="220" x2="256" y2="396">
+            <stop offset="0%" stop-color="#ec4899"/>
+            <stop offset="100%" stop-color="#a13e6b"/>
+          </linearGradient>
+          <linearGradient id="lg4" x1="336" y1="220" x2="256" y2="396">
+            <stop offset="0%" stop-color="#d4538a"/>
+            <stop offset="100%" stop-color="#7a2d54"/>
+          </linearGradient>
+          <linearGradient id="lg5" x1="256" y1="126" x2="176" y2="268">
+            <stop offset="0%" stop-color="#ffffff"/>
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
 
-      <nav class="side-nav" aria-label="Navigation">
-        <button onclick={() => openExternal(WEBSITE_URL)}>Website</button>
-        <button onclick={() => openExternal(DISCORD_URL)}>Support</button>
-        <button>Market</button>
-      </nav>
+    <nav class="side-nav" aria-label="Navigation">
+      <button onclick={() => openExternal(WEBSITE_URL)}>Website</button>
+      <button onclick={() => openExternal(DISCORD_URL)}>Support</button>
+      <button>Market</button>
+    </nav>
 
-      <button class:active={profileOpen} class="profile profile-trigger" data-no-drag onclick={openProfile}>
-        <span class="avatar">
-          {#if avatarDataUrl}
-            <img src={avatarDataUrl} alt="" draggable="false" />
-          {/if}
-        </span>
-        <span>{username}</span>
-      </button>
+    <button class:active={profileOpen} class="profile profile-trigger" data-no-drag onclick={openProfile}>
+      <span class="avatar">
+        {#if avatarDataUrl}
+          <img src={avatarDataUrl} alt="" draggable="false" />
+        {/if}
+      </span>
+      <span>{username}</span>
+    </button>
 
       {#if profileOpen}
         <button
@@ -928,24 +1004,41 @@
 
       <section class="subscriptions" data-tauri-drag-region aria-label="Subscriptions">
         <h1 data-tauri-drag-region>nadeloader</h1>
-        <p data-tauri-drag-region>t.me/nademafia</p>
+        <p data-tauri-drag-region>v2</p>
 
           <button
             class="subscription-card"
-            class:active={anyInstalled}
+            class:active={product === 'neverlose'}
             class:disabled={!anyInstalled}
             disabled={!anyInstalled}
-            onclick={() => { game = 'cs2-csgo_legacy'; openDetails(); }}
+            onclick={() => { product = 'neverlose'; game = 'cs2-csgo_legacy'; openDetails(); }}
           >
           <span>
-            <strong>NeverLose</strong>
+            <strong>NeverNade</strong>
             {#if anyInstalled}
-              <em>t.me/nademafia</em>
+              <em>neverlose crack by nademafia</em>
             {:else}
               <em class="not-installed-label">⚠️ Not Installed</em>
             {/if}
           </span>
-          <img class="game-icon" src="/csgo.png" alt="" draggable="false" />
+          <img class="game-icon" src="/nl.png" alt="" draggable="false" />
+        </button>
+
+          <button
+            class="subscription-card"
+            class:active={product === 'skeet'}
+            disabled={!anyInstalled}
+            onclick={() => { product = 'skeet'; game = 'cs2-csgo_legacy'; openDetails(); }}
+          >
+          <span>
+            <strong>Skeet</strong>
+            {#if anyInstalled}
+              <em>skeet skeet n1 cheat</em>
+            {:else}
+              <em class="not-installed-label">⚠️ Not Installed</em>
+            {/if}
+          </span>
+          <img class="game-icon" src="/skeet.png" alt="" draggable="false" />
         </button>
 
       </section>
@@ -957,14 +1050,16 @@
           class:closing={view === 'closingDetails'}
           class:fading={launchPending || view === 'closingDetails' || view === 'launching'}
           class:launching={view === 'launching'}
+          class:skeet-details={product === 'skeet'}
           class="details"
           data-tauri-drag-region
           aria-label="Subscription details"
         >
           <div class="detail-content">
             <header>
-              <img class="game-icon large" src="/csgo.png" alt="" draggable="false" />
-              <h2>NeverNade</h2>
+              <img class="game-icon large" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
+              <h2>{product === 'skeet' ? 'Skeet' : 'NeverNade'}</h2>
+              {#if !manualLaunch}
               <div class="game-selector">
                 <button
                   class="game-option"
@@ -977,11 +1072,15 @@
                   onclick={() => game = 'csgo'}
                 >Standalone</button>
               </div>
+              {/if}
               <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
             </header>
 
-             <div class="detail-body">
+            <div class="detail-body">
               <div class="metadata">
+                  {#if product === 'skeet'}
+                    <p><span class="label">Branch:</span> <span class="value">Release</span></p>
+                  {:else}
                   <div class="metadata-row with-menu">
                     <span class="label">Branch:</span>
                     <button
@@ -1004,7 +1103,9 @@
                       </div>
                     {/if}
                   </div>
+                  {/if}
                   <p><span class="label">Updated:</span> <span class="value">{updatedAtLabel}</span></p>
+                  {#if product !== 'skeet'}
                   <div class="metadata-row with-menu">
                     <span class="label">Config:</span>
                     <button
@@ -1025,6 +1126,7 @@
                       </div>
                     {/if}
                   </div>
+                  {/if}
                   <p><span class="label">Last Launch:</span> <span class="value">{lastLaunchLabel}</span></p>
                   <p class="manual-metadata-row">
                     <input type="checkbox" bind:checked={manualLaunch} disabled={launchPending} id="manual-launch" />
@@ -1060,6 +1162,7 @@
                   disabled={launchPending}
                   class:active={branchOpen}
                   class="branch-trigger"
+                  class:invisible={product === 'skeet'}
                   aria-label="Select branch"
                   onclick={toggleBranch}
                 >
@@ -1076,10 +1179,12 @@
                       <span class="branch-icon"></span>
                       Release
                     </button>
-                    <button class:selected={branch === 'Nightly'} onclick={() => selectBranch('Nightly')}>
-                      <span class="branch-icon"></span>
-                      Nightly
-                    </button>
+                    {#if product !== 'skeet'}
+                      <button class:selected={branch === 'Nightly'} onclick={() => selectBranch('Nightly')}>
+                        <span class="branch-icon"></span>
+                        Nightly
+                      </button>
+                    {/if}
                   </div>
                 {/if}
               </div>
@@ -1087,7 +1192,7 @@
           </div>
 
           <div class="launch-content" aria-hidden={view !== 'launching'}>
-            <img class="game-icon launch" src="/csgo.png" alt="" draggable="false" />
+            <img class="game-icon launch" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
             <div class="launch-status">
               <span class="launch-dot"></span>
               <span class="launch-phase">{launchPhase || 'Launching...'}</span>
@@ -1098,19 +1203,10 @@
       {/if}
 
     </section>
-  {/if}
 
   {#if launchError}
-    <button
-      class="background-dim visible"
-      aria-label="Dismiss error"
-      onclick={() => { launchError = ''; launchPhase = ''; }}
-      transition:fade={{ duration: 150 }}
-    ></button>
-    <section class="launch-error" data-no-drag aria-label="Launch error" transition:scale={{ duration: 220, start: 0.96, opacity: 0 }}>
-      <button aria-label="Dismiss error" class="launch-error-close" onclick={() => { launchError = ''; launchPhase = ''; }}>
-        {@render IconClose()}
-      </button>
+    <div class="background-dim visible"></div>
+    <section class="launch-error" data-no-drag aria-label="Launch error">
       <div class="launch-error-icon">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="10"/>
@@ -1120,7 +1216,6 @@
       </div>
       <div class="launch-error-title">Launch failed</div>
       <div class="launch-error-message">{launchError}</div>
-      <button class="launch-error-dismiss" onclick={() => { launchError = ''; launchPhase = ''; }}>Dismiss</button>
     </section>
   {/if}
 
@@ -1226,28 +1321,28 @@
     --nl-small-text: rgba(255, 255, 255, 0.575);
     --nl-sidebar-text: rgba(255, 255, 255, 0.589);
     --nl-logo: white;
-    --nl-main-bg: #010306;
-    --nl-main-bg-opaque: #010306;
-    --nl-popup-bg: rgba(7, 12, 19, 0.65);
-    --nl-preview-bg: #03080f;
-    --nl-border: rgba(255, 255, 255, 0.075);
-    --nl-frame-bg: #03080f;
-    --nl-frame-active-bg: rgba(7, 12, 19, 0.72);
+    --nl-main-bg: #120810;
+    --nl-main-bg-opaque: #120810;
+    --nl-popup-bg: rgba(18, 8, 16, 0.65);
+    --nl-preview-bg: #160a12;
+    --nl-border: rgba(255, 255, 255, 0.06);
+    --nl-frame-bg: #160a12;
+    --nl-frame-active-bg: rgba(30, 12, 24, 0.72);
     --nl-text-preview: rgba(247, 245, 255, 0.8);
-    --nl-window-title-bg: rgba(4, 8, 13, 0.96);
+    --nl-window-title-bg: rgba(14, 8, 12, 0.96);
     --nl-active-window-title: rgba(255, 255, 255, 0.88);
-    --nl-spinner: #aab6ff;
-    --nl-block-bg: #03080f;
-    --nl-block-bg-opaque: #03080f;
+    --nl-spinner: #f472b6;
+    --nl-block-bg: #160a12;
+    --nl-block-bg-opaque: #160a12;
     --nl-sidebar-selection: rgba(255, 255, 255, 0.08);
-    --nl-button: #3f66f5;
-    --nl-button-active: #486cee;
+    --nl-button: #f06292;
+    --nl-button-active: #ec4899;
     --nl-button-active-text: rgba(255, 255, 255, 0.9);
-    --nl-link: #626be6;
+    --nl-link: #f472b6;
     --nl-link-active: white;
-    --nl-selection: rgba(16, 31, 49, 0.78);
-    --nl-separator: rgba(255, 255, 255, 0.045);
-    --nl-shadow: rgba(0, 0, 0, 0.52);
+    --nl-selection: rgba(49, 16, 31, 0.78);
+    --nl-separator: rgba(255, 255, 255, 0.04);
+    --nl-shadow: rgba(136, 30, 80, 0.35);
     --nl-shadow-soft: rgba(0, 0, 0, 0.48);
   }
 
@@ -1267,28 +1362,48 @@
   }
 
   .shell {
-    @apply fixed left-1/2 top-1/2 z-10 h-[260px] w-[260px] overflow-hidden rounded-[9px] bg-[var(--nl-main-bg-opaque)];
+    @apply fixed left-1/2 top-1/2 z-10 overflow-hidden bg-[var(--nl-main-bg-opaque)];
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--nl-shadow), transparent 78%),
       0 0 16px color-mix(in srgb, var(--nl-shadow), transparent 72%),
       0 10px 24px rgba(0, 0, 0, 0.24);
     transform: translate(-50%, -50%);
+    width: 260px;
+    height: 260px;
+    border-radius: 9px;
     transition:
-      width 430ms var(--ease-smooth),
-      height 430ms var(--ease-smooth),
-      opacity 180ms ease-in-out;
+      width 600ms var(--ease-smooth),
+      height 600ms var(--ease-smooth),
+      border-radius 500ms var(--ease-smooth);
+  }
+
+  .shell.boot {
+    opacity: 0;
+    animation: shell-appear 700ms var(--ease-smooth) forwards;
   }
 
   .shell.expanded {
-    @apply h-[400px] w-[530px];
+    width: 530px;
+    height: 400px;
+    border-radius: 10px;
+  }
+
+  @keyframes shell-appear {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+    100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
   }
 
   .boot-view {
     @apply absolute inset-0 grid place-items-center;
+    transition: opacity 400ms var(--ease-soft), transform 400ms var(--ease-smooth);
+    opacity: 1;
+    transform: scale(1);
   }
 
-  .boot-view > * {
-    grid-area: 1 / 1;
+  .boot-view.hidden {
+    opacity: 0;
+    transform: scale(0.96);
+    pointer-events: none;
   }
 
   .boot-spinner {
@@ -1310,52 +1425,30 @@
     animation: spinner-arc 1400ms ease-in-out infinite;
   }
 
+
+
   .launcher-view {
     @apply absolute inset-0;
+    transition: opacity 500ms var(--ease-soft) 200ms;
     opacity: 0;
-    animation: fade-in 280ms 170ms ease-in-out both;
+    pointer-events: none;
   }
+
+  .launcher-view.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
 
   .logo {
-    @apply absolute left-[18px] top-[22px] text-[12px] font-medium leading-none text-[var(--nl-logo)];
-    font-family: "Museo Sans Local", "Museo Sans Cyrl", "Museo Sans Cyrillic", "Museo Sans", "Inter Variable", Inter, sans-serif;
-    text-shadow: none;
-    letter-spacing: 0.04em;
-    opacity: 0.7;
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    @apply absolute left-[18px] top-[22px] flex items-center;
+    line-height: 0;
   }
 
-  .update-badge {
-    font-family: "Inter Variable", Inter, sans-serif;
-    font-size: 10px;
-    font-weight: 500;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    border: 0;
-    border-radius: 4px;
-    padding: 2px 8px;
-    background: color-mix(in srgb, var(--nl-link), transparent 82%);
-    color: var(--nl-link);
-    cursor: pointer;
-    transition: background 130ms ease-in-out, color 130ms ease-in-out;
-    line-height: normal;
-    opacity: 1;
-  }
-  .update-badge:hover {
-    background: color-mix(in srgb, var(--nl-link), transparent 70%);
-  }
-  .update-badge.ready {
-    background: color-mix(in srgb, #4caf50, transparent 82%);
-    color: #4caf50;
-  }
-  .update-badge.ready:hover {
-    background: color-mix(in srgb, #4caf50, transparent 70%);
-  }
-  .update-badge:disabled {
-    cursor: default;
-    opacity: 0.6;
+  .logo-icon {
+    width: 32px;
+    height: 32px;
+    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--nl-button), transparent 55%));
   }
 
   .side-nav {
@@ -1652,6 +1745,17 @@
     @apply relative h-[70px] border-b border-[var(--nl-separator)];
   }
 
+  .details.skeet-details .large {
+    filter: drop-shadow(0 0 10px rgba(34, 197, 94, 0.4));
+  }
+
+  .details.skeet-details .load {
+    box-shadow:
+      inset 0 0 0 1px rgba(34, 197, 94, 0.2),
+      0 0 20px rgba(34, 197, 94, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
   .details .large {
     @apply left-[17px] top-1/2 size-[38px] -translate-y-1/2 rounded-[10px];
   }
@@ -1710,11 +1814,11 @@
   }
 
   .metadata .value {
-    @apply ml-1 font-medium text-[var(--nl-link-active)];
+    @apply ml-1 font-medium text-[var(--nl-link)];
   }
 
   .metadata-trigger {
-    @apply m-0 inline-grid h-[22px] max-w-[150px] items-center gap-1.5 rounded-[5px] bg-transparent px-[7px] py-0 text-left font-medium text-[var(--nl-link-active)] align-middle;
+    @apply m-0 inline-grid h-[22px] max-w-[150px] items-center gap-1.5 rounded-[5px] bg-transparent px-[7px] py-0 text-left font-medium text-[var(--nl-link)] align-middle;
     grid-template-columns: 15px minmax(0, auto);
     border: 1px solid color-mix(in srgb, var(--nl-border), var(--nl-text) 14%);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--nl-border), transparent 45%);
@@ -1839,60 +1943,31 @@
   }
 
   .changelog {
-    @apply max-h-[154px] overflow-x-hidden overflow-y-auto break-words pr-2 text-[var(--nl-text)];
-    mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 22px), transparent 100%);
-    -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 22px), transparent 100%);
-    scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--nl-active-text), transparent 75%) transparent;
+    height: 100%;
   }
 
-  .changelog :global(a),
-  .changelog :global(a:visited),
-  .changelog :global(a:active),
-  .changelog :global(a:focus) {
+  .changelog > p:first-child,
+  .date {
+    @apply mb-2 text-[13px] font-light leading-[1.9] text-[var(--nl-active-text)];
+  }
+
+  .changelog a {
+    font-weight: 500;
     color: var(--nl-link);
-    cursor: default !important;
     text-decoration: none;
-    outline: none;
-    transition: color 130ms ease-in-out, text-shadow 130ms ease-in-out;
+    transition: color 130ms ease-in-out;
   }
 
-  .changelog :global(a:hover),
-  .changelog :global(a:visited:hover),
-  .changelog :global(a:active:hover),
-  .changelog :global(a:focus:hover) {
+  .changelog a:hover {
     color: var(--nl-link-active);
-    cursor: default !important;
-    text-shadow: 0 0 10px color-mix(in srgb, var(--nl-link-active), transparent 88%);
-  }
-
-  .changelog::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .changelog::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .changelog::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--nl-active-text), transparent 78%);
-  }
-
-  .changelog .date {
-    color: var(--nl-active-text);
-    margin-bottom: 15px;
-    font-weight: 300;
-  }
-
-  .changelog .date a,
-  .changelog .date span {
-    margin-left: 4px;
   }
 
   .changelog p:not(.date) {
-    color: var(--nl-text);
-    margin-bottom: 20px;
+    @apply text-[13px] font-light leading-[1.9] text-[var(--nl-text)];
+  }
+
+  .changelog p:not(.date) {
+    @apply text-[12.5px] font-light leading-[1.8] text-[var(--nl-text)];
   }
 
   .details footer {
@@ -1908,8 +1983,7 @@
     position: relative;
     display: grid;
     grid-template-columns: 32px 102px;
-    gap: 8px;
-    row-gap: 6px;
+    gap: 7px;
     align-items: center;
   }
 
@@ -1995,6 +2069,11 @@
     border-color: transparent;
     box-shadow: inset 0 0 0 1px transparent;
     background: color-mix(in srgb, var(--nl-button-active), transparent 50%);
+  }
+
+  .branch-trigger.invisible {
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .branch-trigger.active {
@@ -2131,6 +2210,7 @@
     background: linear-gradient(90deg, var(--nl-button), color-mix(in srgb, var(--nl-button), white 25%));
     transition: width 180ms cubic-bezier(0.4, 0, 0.2, 1);
   }
+
 
   @keyframes fill {
     from { transform: scaleX(0); }
@@ -2271,28 +2351,8 @@
     margin-bottom: 18px;
   }
 
-  .launch-error-close {
-    @apply absolute right-2 top-2 grid size-6 place-items-center border-0 bg-transparent p-0 text-[var(--nl-text)] opacity-30 transition-[color,opacity] duration-[120ms] ease-in-out cursor-pointer;
-  }
-  .launch-error-close:hover { opacity: 0.6; }
-
-  .launch-error-dismiss {
-    border: 0;
-    border-radius: 5px;
-    padding: 6px 20px;
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: rgba(255, 82, 82, 0.8);
-    background: color-mix(in srgb, #ff5252, transparent 88%);
-    cursor: pointer;
-    transition: background 130ms ease-in-out, color 130ms ease-in-out;
-    animation: fade-in 200ms 240ms both;
-  }
-  .launch-error-dismiss:hover {
-    background: color-mix(in srgb, #ff5252, transparent 76%);
-    color: #ff5252;
+  .launch-error-icon svg {
+    filter: drop-shadow(0 0 18px rgba(255, 82, 82, 0.35));
   }
 
   .debug-toggle {
