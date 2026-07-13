@@ -72,7 +72,7 @@ pub fn restart_csgo(appid: i32) -> Result<(), LauncherError> {
     let steam = steam_dir.join("steam.exe");
     
     let protocol_string = match appid {
-        730 => "steam://launch/730/option1".to_string(),
+        730 => "steam://launch/730/option2".to_string(),
         _ => format!("steam://launch/{}/dialog", appid),
     };
 
