@@ -1,0 +1,2412 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { fade, scale } from 'svelte/transition';
+  import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { openUrl } from '@tauri-apps/plugin-opener';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+
+  type Branch = 'Release' | 'Nightly';
+  type Game = 'cs2-csgo_legacy' | 'csgo';
+  type View = 'boot' | 'launcher' | 'details' | 'closingDetails' | 'launching';
+  type Product = 'neverlose' | 'skeet';
+  type InstalledGames = {
+    cs2_legacy_branch: boolean;
+    csgo_standalone: boolean;
+  };
+  type ConfigEntry = {
+    entry_id: number;
+    name: string;
+  };
+  type LauncherVersion = {
+    tag: string;
+    name: string;
+    changelog: string;
+    updated_at: string;
+    url: string;
+    assets: LauncherAsset[];
+  };
+  type LauncherAsset = {
+    name: string;
+    url: string;
+    size: number;
+  };
+
+
+  const WEBSITE_URL = 'https://krahmal1337.github.io';
+  const DISCORD_URL = 'https://discord.gg/n8EAhu3kcD';
+  const API_DOCS_URL = 'https://docs-csgo.neverlose.cc/';
+
+  let view = $state<View>('boot');
+  let game = $state<Game>('csgo');
+  let product = $state<Product>('neverlose');
+  let installedStatus = $state<InstalledGames>({
+    cs2_legacy_branch: false,
+    csgo_standalone: false,
+  });
+  let anyInstalled = $derived(installedStatus.cs2_legacy_branch || installedStatus.csgo_standalone);
+  let branch = $state<Branch>('Release');
+  let branchOpen = $state(false);
+  let versionOpen = $state(false);
+  let configOpen = $state(false);
+  let profileOpen = $state(false);
+  let profileSaving = $state(false);
+  let profileError = $state('');
+  let username = $state('Player');
+  let profileNameInput = $state('');
+  let avatarDataUrl = $state('');
+  let avatarDataUrlBeforeEdit = $state('');
+  let pendingAvatarBytes = $state<number[] | null>(null);
+  let avatarInput = $state<HTMLInputElement | null>(null);
+  let configs = $state<ConfigEntry[]>([]);
+  let selectedConfigId = $state<number | null>(null);
+  let nlGitMetadata = $state<LauncherGitMetadata>({
+    releases: [],
+    nightlies: []
+  });
+  let skeetGitMetadata = $state<LauncherGitMetadata>({
+    releases: [],
+    nightlies: []
+  });
+  let gitMetadata = $derived(product === 'skeet' ? skeetGitMetadata : nlGitMetadata);
+  let nlSelectedVersion = $state('');
+  let skeetSelectedVersion = $state('');
+  let selectedVersion = $derived(product === 'skeet' ? skeetSelectedVersion : nlSelectedVersion);
+  let launchPending = $state(false);
+  let manualLaunch = $state(false);
+  let launchError = $state('');
+  let progress = $state(0);
+  let lastLaunchTime = $state<Date | null>(null);
+  let launchPhase = $state('');
+  let themeVariables = $state('');
+  let launchTimer: number | undefined;
+  let closeTimer: number | undefined;
+  let debugOpen = $state(false);
+  let logEntries = $state<{ time: string; msg: string; type: string }[]>([]);
+
+  function logToConsole(msg: string, type: string = 'log') {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+    logEntries = [...logEntries.slice(-199), { time, msg, type }];
+  }
+
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.log = (...args) => { origLog.apply(console, args); logToConsole(args.join(' '), 'log'); };
+  console.warn = (...args) => { origWarn.apply(console, args); logToConsole(args.join(' '), 'warn'); };
+  console.error = (...args) => { origError.apply(console, args); logToConsole(args.join(' '), 'error'); };
+
+  const selectedVersionList = $derived(branch === 'Release' ? gitMetadata.releases : gitMetadata.nightlies);
+  const selectedVersionData = $derived(
+    selectedVersionList.find((version) => version.tag === selectedVersion) ?? selectedVersionList[0]
+  );
+  const selectedVersionLabel = $derived(selectedVersion || 'No builds');
+  const selectedBranchLabel = $derived(`${branch} ${selectedVersionLabel}`);
+  const selectedConfigName = $derived(
+    configs.find((config) => config.entry_id === selectedConfigId)?.name ?? 'Loading...'
+  );
+  const versions = $derived(selectedVersionList);
+  const updatedAtLabel = $derived(formatGitDate(selectedVersionData?.updated_at));
+  const changelogEntries = $derived(parseChangelog(selectedVersionData?.changelog));
+  const selectedReleaseUrl = $derived(selectedVersionData?.url ?? '');
+  const lastLaunchLabel = $derived.by(() => {
+    if (launchPhase) return launchPhase;
+    if (!lastLaunchTime) return 'Never';
+    const diff = Date.now() - lastLaunchTime.getTime();
+    if (diff < 10000) return 'Just Now';
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return sec + 's ago';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + ' min ago';
+    return lastLaunchTime.toLocaleTimeString();
+  });
+  const appWindow = getOptionalCurrentWindow();
+
+  type LauncherTheme = {
+    source: string;
+    variables: Record<string, string>;
+  };
+
+  type LauncherSettings = {
+    username: string;
+    avatar_data_url: string | null;
+    selected_config_id: number | null;
+    configs: ConfigEntry[];
+  };
+
+  type LauncherGitMetadata = {
+    releases: LauncherVersion[];
+    nightlies: LauncherVersion[];
+  };
+
+  function getOptionalCurrentWindow() {
+    try {
+      return getCurrentWindow();
+    } catch {
+      return null;
+    }
+  }
+
+  function hasTauriRuntime() {
+    return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  }
+
+  onMount(() => {
+    const blockContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    const blockDevtoolsShortcuts = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const opensDevtools =
+        event.key === 'F12' ||
+        (event.ctrlKey && event.shiftKey && (key === 'i' || key === 'j' || key === 'c')) ||
+        (event.ctrlKey && key === 'u');
+
+      if (opensDevtools) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        closeMenus();
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    const closeFloatingMenus = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+
+      if (
+        target.closest(
+          '.branch-trigger, .branch-menu, .metadata-trigger, .metadata-menu, .changelog a, .profile-trigger, .profile-popout'
+        )
+      ) {
+        return;
+      }
+
+      closeMenus();
+    };
+
+    window.addEventListener('contextmenu', blockContextMenu);
+    window.addEventListener('keydown', blockDevtoolsShortcuts, true);
+    window.addEventListener('mousedown', closeFloatingMenus, true);
+    window.addEventListener('mousedown', dragWindow, true);
+    void loadTheme();
+    void loadSettings();
+    void detectInstalledGames();
+
+    const metadataPromise = Promise.all([
+      loadGitMetadataFor('neverlose').catch(() => {}),
+      loadGitMetadataFor('skeet').catch(() => {}),
+    ]);
+
+    metadataPromise.finally(() => showLauncher());
+
+    if (hasTauriRuntime()) {
+      const unlisten = listen<string>('log', (e) => logToConsole(e.payload, 'backend'));
+      return () => {
+        window.removeEventListener('contextmenu', blockContextMenu);
+        window.removeEventListener('keydown', blockDevtoolsShortcuts, true);
+        window.removeEventListener('mousedown', closeFloatingMenus, true);
+        window.removeEventListener('mousedown', dragWindow, true);
+        unlisten.then((fn) => fn());
+      };
+    }
+
+    return () => {
+      window.removeEventListener('contextmenu', blockContextMenu);
+      window.removeEventListener('keydown', blockDevtoolsShortcuts, true);
+      window.removeEventListener('mousedown', closeFloatingMenus, true);
+      window.removeEventListener('mousedown', dragWindow, true);
+    };
+  });
+
+  async function detectInstalledGames() {
+    if (!hasTauriRuntime()) {
+      installedStatus = {
+        cs2_legacy_branch: true,
+        csgo_standalone: true,
+      };
+      return;
+    }
+    try {
+      installedStatus = await invoke<InstalledGames>('detect_installed_games');
+    } catch (error) {
+      console.warn('Failed to detect installed games', error);
+    }
+  }
+
+  const appids: Record<Game, number> = {
+      csgo: 4465480,
+      'cs2-csgo_legacy': 730,
+  };
+
+  function showLauncher() {
+    view = 'launcher';
+  }
+
+  async function loadTheme() {
+    if (!hasTauriRuntime()) {
+      return;
+    }
+
+    try {
+      const theme = await invoke<LauncherTheme>('load_launcher_theme');
+      themeVariables = Object.entries(theme.variables)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('; ');
+    } catch (error) {
+      console.warn('Failed to load launcher theme', error);
+    }
+  }
+
+  async function loadSettings() {
+    if (!hasTauriRuntime()) {
+      profileNameInput = username;
+      return;
+    }
+
+    try {
+      const settings = await invoke<LauncherSettings>('load_launcher_settings');
+      applyLauncherSettings(settings);
+    } catch (error) {
+      console.warn('Failed to load launcher settings', error);
+    }
+  }
+
+  function applyLauncherSettings(settings: LauncherSettings) {
+    username = settings.username || 'Player';
+    profileNameInput = username;
+    avatarDataUrl = settings.avatar_data_url ?? avatarDataUrl;
+    avatarDataUrlBeforeEdit = avatarDataUrl;
+    configs = settings.configs;
+    selectedConfigId = settings.selected_config_id ?? settings.configs[0]?.entry_id ?? null;
+  }
+
+  async function loadGitMetadataFor(product: Product) {
+    const setMetadata = (data: LauncherGitMetadata) => {
+      if (product === 'skeet') {
+        skeetGitMetadata = data;
+      } else {
+        nlGitMetadata = data;
+      }
+    };
+    const setVersion = (v: string) => {
+      if (product === 'skeet') {
+        skeetSelectedVersion = v;
+      } else {
+        nlSelectedVersion = v;
+      }
+    };
+
+    if (!hasTauriRuntime()) {
+      console.log('[ui] no Tauri runtime, using placeholder metadata');
+      setMetadata({
+        releases: [
+          {
+            tag: 'Unavailable',
+            name: 'Unavailable',
+            changelog: 'Git metadata is loaded from Tauri.',
+            updated_at: '',
+            url: '',
+            assets: []
+          }
+        ],
+        nightlies: []
+      });
+      setVersion('Unavailable');
+      return;
+    }
+
+    try {
+      console.log('[ui] loading Git metadata from backend for', product);
+      const metadata = await invoke<LauncherGitMetadata>('load_git_metadata', { product });
+      console.log('[ui] Git metadata loaded:', metadata.releases.length, 'releases,', metadata.nightlies.length, 'nightlies');
+      setMetadata(metadata);
+      setVersion(metadata.releases[0]?.tag ?? metadata.nightlies[0]?.tag ?? '');
+    } catch (error) {
+      console.warn('[ui] Failed to load GitHub metadata', error);
+      setMetadata({
+        releases: [
+          {
+            tag: 'Unavailable',
+            name: 'Unavailable',
+            changelog: 'Could not load GitHub release metadata.',
+            updated_at: '',
+            url: '',
+            assets: []
+          }
+        ],
+        nightlies: []
+      });
+      setVersion('Unavailable');
+    }
+  }
+
+  async function minimizeWindow(event?: MouseEvent) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    if (!hasTauriRuntime()) {
+      return;
+    }
+    await invoke('minimize_main_window');
+  }
+
+  async function closeWindow(event?: MouseEvent) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    if (!hasTauriRuntime()) {
+      return;
+    }
+    await invoke('close_main_window');
+  }
+
+  function openDetails() {
+    branchOpen = false;
+    versionOpen = false;
+    configOpen = false;
+    launchPending = false;
+    if (product === 'skeet') {
+      branch = 'Release';
+      if (!skeetSelectedVersion) {
+        skeetSelectedVersion = skeetGitMetadata.releases[0]?.tag ?? '';
+      }
+    } else {
+      if (!nlSelectedVersion) {
+        nlSelectedVersion = nlGitMetadata.releases[0]?.tag ?? '';
+      }
+    }
+    view = 'details';
+  }
+
+  function closeDetails() {
+    if (launchTimer) {
+      window.clearTimeout(launchTimer);
+      launchTimer = undefined;
+    }
+
+    branchOpen = false;
+    versionOpen = false;
+    configOpen = false;
+    launchPending = false;
+
+    if (view === 'details') {
+      view = 'closingDetails';
+      closeTimer = window.setTimeout(() => {
+        view = 'launcher';
+        closeTimer = undefined;
+      }, 240);
+      return;
+    }
+
+    view = 'launcher';
+  }
+
+  function toggleBranch(event: MouseEvent) {
+    event.stopPropagation();
+    versionOpen = false;
+    configOpen = false;
+    branchOpen = !branchOpen;
+  }
+
+  function selectBranch(next: Branch) {
+    if (product === 'skeet' && next === 'Nightly') return;
+    console.log('[ui] selectBranch: ' + next);
+    branch = next;
+    const tag = (next === 'Release' ? gitMetadata.releases : gitMetadata.nightlies)[0]?.tag ?? '';
+    if (product === 'skeet') {
+      skeetSelectedVersion = tag;
+    } else {
+      nlSelectedVersion = tag;
+    }
+    branchOpen = false;
+  }
+
+  function toggleVersion(event: MouseEvent) {
+    event.stopPropagation();
+    configOpen = false;
+    branchOpen = false;
+    versionOpen = !versionOpen;
+  }
+
+  function selectVersion(version: string) {
+    console.log('[ui] selectVersion: ' + version);
+    if (product === 'skeet') {
+      skeetSelectedVersion = version;
+    } else {
+      nlSelectedVersion = version;
+    }
+    versionOpen = false;
+  }
+
+  function toggleConfig(event: MouseEvent) {
+    event.stopPropagation();
+    branchOpen = false;
+    versionOpen = false;
+    configOpen = !configOpen;
+  }
+
+  function selectConfig(config: ConfigEntry) {
+    selectedConfigId = config.entry_id;
+    configOpen = false;
+  }
+
+  async function openExternal(url: string) {
+    if (!url) {
+      return;
+    }
+
+    if (!hasTauriRuntime()) {
+      window.open(url, '_blank', 'noreferrer');
+      return;
+    }
+
+    try {
+      await openUrl(url);
+    } catch (error) {
+      console.warn('Failed to open link', error);
+    }
+  }
+
+  function openProfile(event: MouseEvent) {
+    event.stopPropagation();
+    profileNameInput = username;
+    avatarDataUrlBeforeEdit = avatarDataUrl;
+    pendingAvatarBytes = null;
+    profileError = '';
+    branchOpen = false;
+    versionOpen = false;
+    configOpen = false;
+    profileOpen = !profileOpen;
+  }
+
+  function chooseAvatar() {
+    avatarInput?.click();
+  }
+
+  async function handleAvatarChange(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      profileError = 'Choose an image file.';
+      input.value = '';
+      return;
+    }
+
+    try {
+      const rounded = await roundedAvatarPng(file);
+      pendingAvatarBytes = Array.from(rounded.bytes);
+      avatarDataUrl = rounded.dataUrl;
+      profileError = '';
+    } catch (error) {
+      profileError = String(error);
+    } finally {
+      input.value = '';
+    }
+  }
+
+  function cancelProfileEdit() {
+    profileNameInput = username;
+    avatarDataUrl = avatarDataUrlBeforeEdit;
+    pendingAvatarBytes = null;
+    profileError = '';
+  }
+
+  async function roundedAvatarPng(file: File) {
+    const source = await fileToDataUrl(file);
+    const image = await loadImage(source);
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Could not prepare profile image.');
+    }
+
+    const edge = Math.min(image.naturalWidth, image.naturalHeight);
+    const sx = (image.naturalWidth - edge) / 2;
+    const sy = (image.naturalHeight - edge) / 2;
+    const radius = 32;
+    context.clearRect(0, 0, size, size);
+    context.save();
+    context.beginPath();
+    context.moveTo(radius, 0);
+    context.lineTo(size - radius, 0);
+    context.quadraticCurveTo(size, 0, size, radius);
+    context.lineTo(size, size - radius);
+    context.quadraticCurveTo(size, size, size - radius, size);
+    context.lineTo(radius, size);
+    context.quadraticCurveTo(0, size, 0, size - radius);
+    context.lineTo(0, radius);
+    context.quadraticCurveTo(0, 0, radius, 0);
+    context.closePath();
+    context.clip();
+    context.drawImage(image, sx, sy, edge, edge, 0, 0, size, size);
+    context.restore();
+
+    const dataUrl = canvas.toDataURL('image/png');
+    const response = await fetch(dataUrl);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { bytes, dataUrl };
+  }
+
+  function loadImage(src: string) {
+    return new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Could not load profile image.'));
+      image.src = src;
+    });
+  }
+
+  function fileToDataUrl(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function saveProfile() {
+    const nextUsername = profileNameInput.trim();
+    if (!nextUsername) {
+      profileError = 'Enter a profile name.';
+      return;
+    }
+
+    profileSaving = true;
+    profileError = '';
+    if (!hasTauriRuntime()) {
+      username = nextUsername;
+      profileNameInput = username;
+      avatarDataUrlBeforeEdit = avatarDataUrl;
+      pendingAvatarBytes = null;
+      profileSaving = false;
+      return;
+    }
+
+    try {
+      const settings = await invoke<LauncherSettings>('save_launcher_profile', {
+        username: nextUsername,
+        avatarBytes: pendingAvatarBytes
+      });
+      applyLauncherSettings(settings);
+      pendingAvatarBytes = null;
+    } catch (error) {
+      profileError = String(error);
+    } finally {
+      profileSaving = false;
+    }
+  }
+
+  async function saveProfileName() {
+    if (profileSaving || profileNameInput.trim() === username) {
+      return;
+    }
+    await saveProfile();
+  }
+
+  function handleProfileNameKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void saveProfileName();
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      profileNameInput = username;
+      profileError = '';
+    }
+  }
+
+  function launch(appid: number) {
+    console.log('[ui] launch requested: appid=' + appid + ', version=' + selectedVersion + ', manualLaunch=' + manualLaunch);
+    branchOpen = false;
+    launchPending = true;
+    launchError = '';
+    progress = 0;
+    const versionToLaunch = selectedVersion;
+    const configIdToLaunch = selectedConfigId;
+    const dllNameToUse = product === 'skeet' ? 'skeet.dll' : 'neverlose.dll';
+
+    if (closeTimer) {
+      window.clearTimeout(closeTimer);
+      closeTimer = undefined;
+    }
+
+    launchTimer = window.setTimeout(() => {
+      if (!launchPending) {
+        return;
+      }
+
+      view = 'launching';
+      launchTimer = undefined;
+      void startLaunchProgress(versionToLaunch, configIdToLaunch, appid, dllNameToUse);
+    }, 230);
+  }
+
+  async function startLaunchProgress(versionToLaunch: string, configIdToLaunch: number | null, appid: number | null, dllName: string) {
+    console.log('[ui] startLaunchProgress: version=' + versionToLaunch + ', appid=' + appid + ', manualLaunch=' + manualLaunch + ', dll=' + dllName);
+    const startedAt = performance.now();
+    let finished = false;
+    const tick = () => {
+      const elapsed = performance.now() - startedAt;
+      progress = finished ? 100 : Math.min(92, 18 + (elapsed / 3200) * 74);
+      if (!finished) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+
+    try {
+      launchPhase = 'Downloading...';
+      console.log('[ui] prepare_version...');
+      const dllPath = await invoke<string>('prepare_version', { tag: versionToLaunch, dllName: dllName });
+      console.log('[ui] DLL ready:', dllPath);
+
+      if (manualLaunch) {
+        launchPhase = 'Launch CSGO manually...';
+        console.log('[ui] manual launch: waiting for user to start CSGO');
+      } else {
+        launchPhase = 'Launching game...';
+        console.log('[ui] launching game...');
+        await invoke('launch_game_process', { appid });
+      }
+
+      launchPhase = 'Waiting for CSGO...';
+      console.log('[ui] wait_and_inject...');
+      await invoke('wait_and_inject', { dllPath: dllPath, dllName: dllName });
+      console.log('[ui] done');
+
+      finished = true;
+      progress = 100;
+      lastLaunchTime = new Date();
+      launchPhase = 'Done ✓';
+      window.setTimeout(() => void appWindow?.close().catch(() => undefined), 5000);
+    } catch (error) {
+      console.warn('[ui] launch failed:', error);
+      const msg = error instanceof Error ? error.message
+        : typeof error === 'string' ? error
+        : error && typeof error === 'object' && 'message' in error ? (error as {message: string}).message
+        : JSON.stringify(error);
+      launchError = msg.replace(/^[^:]*:\s*/, '');
+      launchPending = false;
+      launchPhase = 'Failed';
+      if (view === 'launching') view = 'closingDetails';
+      progress = 0;
+      await invoke('kill_background_processes');
+      window.setTimeout(() => void invoke('close_main_window').catch(() => undefined), 5000);
+    }
+  }
+
+  function closeBranchFromBackdrop() {
+    closeMenus();
+  }
+
+  function closeMenus() {
+    branchOpen = false;
+    versionOpen = false;
+    configOpen = false;
+    if (profileOpen && pendingAvatarBytes) {
+      avatarDataUrl = avatarDataUrlBeforeEdit;
+      pendingAvatarBytes = null;
+    }
+    profileOpen = false;
+  }
+
+  function formatGitDate(value: string | undefined) {
+    if (!value) {
+      return 'Unknown';
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    const day = date.getDate().toString().padStart(2, '0');
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const year = date.getFullYear();
+    const hour = date.getHours().toString().padStart(2, '0');
+    const minute = date.getMinutes().toString().padStart(2, '0');
+
+    return `${day}.${month}.${year} ${hour}:${minute}`;
+  }
+
+  function parseChangelog(value: string | undefined) {
+    const trimmed = value?.trim();
+
+    if (!trimmed) {
+      return ['No changelog provided.'];
+    }
+
+    return trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.replace(/^[-*]\s*/, '- '));
+  }
+
+  function renderMarkdownLine(value: string) {
+    return escapeHtml(value).replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer">$1</a>'
+    );
+  }
+
+  function escapeHtml(value: string) {
+    return value
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function dragWindow(event: MouseEvent) {
+    if (event.buttons !== 1) {
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    const scrollArea = target.closest('.changelog');
+
+    if (scrollArea) {
+      const bounds = scrollArea.getBoundingClientRect();
+      const scrollbarWidth = 10;
+
+      if (event.clientX >= bounds.right - scrollbarWidth) {
+        return;
+      }
+    }
+
+    if (!target.closest('.shell')) {
+      return;
+    }
+
+    if (isInteractiveElement(target)) {
+      return;
+    }
+
+    event.preventDefault();
+    void appWindow?.startDragging().catch(() => undefined);
+  }
+
+  function isInteractiveElement(element: HTMLElement) {
+    const interactive = element.closest(
+      'button, a, input, textarea, select, option, [role="button"], [role="link"], [tabindex], [contenteditable="true"], [data-no-drag]'
+    );
+
+    if (interactive) {
+      return true;
+    }
+
+    return getComputedStyle(element).cursor === 'pointer';
+  }
+</script>
+
+{#snippet IconChevron()}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M7 10l5 5 5-5" />
+  </svg>
+{/snippet}
+
+{#snippet IconPlay()}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M8 5v14l11-7z" />
+  </svg>
+{/snippet}
+
+{#snippet IconBranch()}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="7" cy="6" r="2" />
+    <circle cx="17" cy="6" r="2" />
+    <circle cx="7" cy="18" r="2" />
+    <path d="M7 8v8M9 6h4a4 4 0 0 1 4 4v0" />
+  </svg>
+{/snippet}
+
+{#snippet IconClose()}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M7 7l10 10M17 7L7 17" />
+  </svg>
+{/snippet}
+
+{#snippet IconCog()}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z" />
+    <path d="M19.43 12.98c.04-.32.07-.65.07-.98s-.02-.66-.07-.98l2.03-1.58-1.92-3.32-2.39.96a7.48 7.48 0 0 0-1.7-.98L15.1 3.5h-3.84l-.36 2.6c-.6.24-1.17.56-1.7.98l-2.39-.96-1.92 3.32 2.03 1.58c-.04.32-.07.65-.07.98s.02.66.07.98l-2.03 1.58 1.92 3.32 2.39-.96c.52.41 1.09.74 1.7.98l.36 2.6h3.84l.36-2.6c.6-.24 1.17-.56 1.7-.98l2.39.96 1.92-3.32-2.03-1.58Z" />
+  </svg>
+{/snippet}
+
+{#snippet IconConstruction()}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="2" y="6" width="20" height="8" rx="1" />
+    <path d="M17 14v7" />
+    <path d="M7 14v7" />
+    <path d="M17 3v3" />
+    <path d="M7 3v3" />
+    <path d="M10 14 2.3 6.3" />
+    <path d="M14 6l8 8" />
+    <path d="M8 6l8 8" />
+  </svg>
+{/snippet}
+
+<svelte:head>
+  <title>nadeloader | reloaded</title>
+</svelte:head>
+
+{#if branchOpen || versionOpen || configOpen || profileOpen}
+  <button class="click-away" aria-label="Close menu" onclick={closeBranchFromBackdrop}></button>
+{/if}
+
+<main
+  class:boot={view === 'boot'}
+  class:expanded={view !== 'boot'}
+  class="shell"
+  data-tauri-drag-region
+  style={themeVariables}
+>
+  <section class="boot-view" class:hidden={view !== 'boot'} data-tauri-drag-region aria-label="Loading">
+    <div class="boot-middle">
+      <div class="boot-spinner">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <circle cx="24" cy="24" r="17"></circle>
+        </svg>
+      </div>
+    </div>
+  </section>
+  <section class="launcher-view" class:visible={view !== 'boot'} data-tauri-drag-region aria-label="Launcher">
+    <div class="logo" data-tauri-drag-region>
+      <svg class="logo-icon" viewBox="0 0 512 512" fill="none" aria-label="Nadeloader">
+        <path d="M256 126 L176 220 L256 268 L336 220 Z" fill="url(#lg1)"/>
+        <path d="M256 126 L256 268 L336 220 Z" fill="url(#lg2)"/>
+        <path d="M176 220 L256 268 L256 396 L216 270 Z" fill="url(#lg3)"/>
+        <path d="M256 268 L336 220 L256 396 L296 270 Z" fill="url(#lg4)"/>
+        <path d="M256 126 L176 220 L256 268 Z" fill="url(#lg5)" opacity="0.15"/>
+        <defs>
+          <linearGradient id="lg1" x1="256" y1="126" x2="176" y2="268">
+            <stop offset="0%" stop-color="#f9a8d4"/>
+            <stop offset="100%" stop-color="#f472b6"/>
+          </linearGradient>
+          <linearGradient id="lg2" x1="256" y1="126" x2="336" y2="268">
+            <stop offset="0%" stop-color="#f472b6"/>
+            <stop offset="100%" stop-color="#ec4899"/>
+          </linearGradient>
+          <linearGradient id="lg3" x1="176" y1="220" x2="256" y2="396">
+            <stop offset="0%" stop-color="#ec4899"/>
+            <stop offset="100%" stop-color="#a13e6b"/>
+          </linearGradient>
+          <linearGradient id="lg4" x1="336" y1="220" x2="256" y2="396">
+            <stop offset="0%" stop-color="#d4538a"/>
+            <stop offset="100%" stop-color="#7a2d54"/>
+          </linearGradient>
+          <linearGradient id="lg5" x1="256" y1="126" x2="176" y2="268">
+            <stop offset="0%" stop-color="#ffffff"/>
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+
+    <nav class="side-nav" aria-label="Navigation">
+      <button onclick={() => openExternal(WEBSITE_URL)}>Website</button>
+      <button onclick={() => openExternal(DISCORD_URL)}>Support</button>
+      <button>Market</button>
+    </nav>
+
+    <button class:active={profileOpen} class="profile profile-trigger" data-no-drag onclick={openProfile}>
+      <span class="avatar">
+        {#if avatarDataUrl}
+          <img src={avatarDataUrl} alt="" draggable="false" />
+        {/if}
+      </span>
+      <span>{username}</span>
+    </button>
+
+      {#if profileOpen}
+        <button
+          class="background-dim visible profile-dim"
+          aria-label="Close profile settings"
+          onclick={closeMenus}
+          transition:fade={{ duration: 210 }}
+        ></button>
+        <section
+          class="profile-popout"
+          data-no-drag
+          aria-label="Profile settings"
+          transition:scale={{ duration: 220, start: 0.985, opacity: 0 }}
+        >
+          <button aria-label="Close profile settings" class="detail-close profile-close" onclick={closeMenus}>
+            {@render IconClose()}
+          </button>
+
+          <div class="profile-content">
+            <button class="avatar profile-popout-avatar" aria-label="Change profile image" onclick={chooseAvatar}>
+              {#if avatarDataUrl}
+                <img src={avatarDataUrl} alt="" draggable="false" />
+              {/if}
+              <span>Change</span>
+            </button>
+            <input
+              bind:this={avatarInput}
+              class="avatar-file"
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              onchange={handleAvatarChange}
+            />
+
+            <div class="profile-name-card">
+              <input
+                bind:value={profileNameInput}
+                maxlength="32"
+                spellcheck="false"
+                aria-label="Profile name"
+                onblur={saveProfileName}
+                onkeydown={handleProfileNameKeydown}
+              />
+            </div>
+
+            {#if profileError}
+              <p class="profile-error">{profileError}</p>
+            {/if}
+
+            {#if pendingAvatarBytes}
+              <div class="profile-actions">
+                <button onclick={cancelProfileEdit} disabled={profileSaving}>Cancel</button>
+                <button class="save-profile" onclick={saveProfile} disabled={profileSaving}>
+                  {profileSaving ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            {/if}
+
+            <div class="profile-wip">
+              {@render IconConstruction()}
+              <span>Work In Progress</span>
+            </div>
+          </div>
+        </section>
+      {/if}
+
+      <div class="window-controls" data-no-drag>
+        <button aria-label="Minimize" class="minimize" data-no-drag onclick={minimizeWindow}><span></span></button>
+        <button aria-label="Close" class="close" data-no-drag onclick={closeWindow}>{@render IconClose()}</button>
+      </div>
+
+      <section class="subscriptions" data-tauri-drag-region aria-label="Subscriptions">
+        <h1 data-tauri-drag-region>nadeloader</h1>
+        <p data-tauri-drag-region>v2</p>
+
+          <button
+            class="subscription-card"
+            class:active={product === 'neverlose'}
+            class:disabled={!anyInstalled}
+            disabled={!anyInstalled}
+            onclick={() => { product = 'neverlose'; game = 'cs2-csgo_legacy'; openDetails(); }}
+          >
+          <span>
+            <strong>NeverNade</strong>
+            {#if anyInstalled}
+              <em>neverlose crack by nademafia</em>
+            {:else}
+              <em class="not-installed-label">⚠️ Not Installed</em>
+            {/if}
+          </span>
+          <img class="game-icon" src="/nl.png" alt="" draggable="false" />
+        </button>
+
+          <button
+            class="subscription-card"
+            class:active={product === 'skeet'}
+            disabled={!anyInstalled}
+            onclick={() => { product = 'skeet'; game = 'cs2-csgo_legacy'; openDetails(); }}
+          >
+          <span>
+            <strong>Skeet</strong>
+            {#if anyInstalled}
+              <em>skeet skeet n1 cheat</em>
+            {:else}
+              <em class="not-installed-label">⚠️ Not Installed</em>
+            {/if}
+          </span>
+          <img class="game-icon" src="/skeet.png" alt="" draggable="false" />
+        </button>
+
+      </section>
+
+      {#if view === 'details' || view === 'closingDetails' || view === 'launching'}
+        <div class:visible={view !== 'closingDetails'} class="background-dim"></div>
+
+        <section
+          class:closing={view === 'closingDetails'}
+          class:fading={launchPending || view === 'closingDetails' || view === 'launching'}
+          class:launching={view === 'launching'}
+          class:skeet-details={product === 'skeet'}
+          class="details"
+          data-tauri-drag-region
+          aria-label="Subscription details"
+        >
+          <div class="detail-content">
+            <header>
+              <img class="game-icon large" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
+              <h2>{product === 'skeet' ? 'Skeet' : 'NeverNade'}</h2>
+              {#if !manualLaunch}
+              <div class="game-selector">
+                <button
+                  class="game-option"
+                  class:active={game === 'cs2-csgo_legacy'}
+                  onclick={() => game = 'cs2-csgo_legacy'}
+                >Legacy</button>
+                <button
+                  class="game-option"
+                  class:active={game === 'csgo'}
+                  onclick={() => game = 'csgo'}
+                >Standalone</button>
+              </div>
+              {/if}
+              <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
+            </header>
+
+            <div class="detail-body">
+              <div class="metadata">
+                  {#if product === 'skeet'}
+                    <p><span class="label">Branch:</span> <span class="value">Release</span></p>
+                  {:else}
+                  <div class="metadata-row with-menu">
+                    <span class="label">Branch:</span>
+                    <button
+                      class:active={versionOpen}
+                      class="metadata-trigger version-trigger"
+                      onclick={toggleVersion}
+                    >
+                      <span class="trigger-icon branch-icon-small"></span>
+                      <span>{selectedBranchLabel}</span>
+                    </button>
+                    {#if versionOpen}
+                      <div class="metadata-menu version-menu">
+                        {#each versions as version}
+                          <button class:selected={version.tag === selectedVersion} onclick={() => selectVersion(version.tag)}>
+                            {version.tag}
+                          </button>
+                        {:else}
+                          <button disabled>No builds</button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  {/if}
+                  <p><span class="label">Updated:</span> <span class="value">{updatedAtLabel}</span></p>
+                  {#if product !== 'skeet'}
+                  <div class="metadata-row with-menu">
+                    <span class="label">Config:</span>
+                    <button
+                      class:active={configOpen}
+                      class="metadata-trigger config-trigger"
+                      onclick={toggleConfig}
+                    >
+                      <span class="trigger-icon cog-icon-small">{@render IconCog()}</span>
+                      <span>{selectedConfigName}</span>
+                    </button>
+                    {#if configOpen}
+                      <div class="metadata-menu config-menu">
+                        {#each configs as config}
+                          <button class:selected={config.entry_id === selectedConfigId} onclick={() => selectConfig(config)}>
+                            {config.name}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  {/if}
+                  <p><span class="label">Last Launch:</span> <span class="value">{lastLaunchLabel}</span></p>
+                  <p class="manual-metadata-row">
+                    <input type="checkbox" bind:checked={manualLaunch} disabled={launchPending} id="manual-launch" />
+                    <label for="manual-launch">manual launch</label>
+                  </p>
+                </div>
+
+                <div class="changelog">
+                  <p class="date">
+                    Changelogs
+                    {#if selectedReleaseUrl}
+                      <a href={selectedReleaseUrl} target="_blank" rel="noreferrer">{selectedVersionLabel}</a>
+                    {:else}
+                      <span>{selectedVersionLabel}</span>
+                    {/if}
+                  </p>
+                  <p>
+                    {#each changelogEntries as entry}
+                      {@html renderMarkdownLine(entry)}<br />
+                    {/each}
+                  </p>
+                </div>
+            </div>
+
+            <footer>
+              <div class="footer-links">
+                <button onclick={() => openExternal(DISCORD_URL)}>Community</button>
+                <button onclick={() => openExternal(API_DOCS_URL)}>API Documentation</button>
+              </div>
+
+              <div class="actions">
+                <button
+                  disabled={launchPending}
+                  class:active={branchOpen}
+                  class="branch-trigger"
+                  class:invisible={product === 'skeet'}
+                  aria-label="Select branch"
+                  onclick={toggleBranch}
+                >
+                  {@render IconChevron()}
+                </button>
+                <button disabled={branchOpen || launchPending} class="load" onclick={() => launch(appids[game])}>
+                  <span class="play-icon">{@render IconPlay()}</span>
+                  Load
+                </button>
+
+                {#if branchOpen}
+                  <div class="branch-menu">
+                    <button class:selected={branch === 'Release'} onclick={() => selectBranch('Release')}>
+                      <span class="branch-icon"></span>
+                      Release
+                    </button>
+                    {#if product !== 'skeet'}
+                      <button class:selected={branch === 'Nightly'} onclick={() => selectBranch('Nightly')}>
+                        <span class="branch-icon"></span>
+                        Nightly
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            </footer>
+          </div>
+
+          <div class="launch-content" aria-hidden={view !== 'launching'}>
+            <img class="game-icon launch" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
+            <div class="launch-status">
+              <span class="launch-dot"></span>
+              <span class="launch-phase">{launchPhase || 'Launching...'}</span>
+            </div>
+            <div class="progress"><span style={`width: ${progress}%`}></span></div>
+          </div>
+        </section>
+      {/if}
+
+    </section>
+
+  {#if launchError}
+    <div class="background-dim visible"></div>
+    <section class="launch-error" data-no-drag aria-label="Launch error">
+      <div class="launch-error-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="15" y1="9" x2="9" y2="15"/>
+          <line x1="9" y1="9" x2="15" y2="15"/>
+        </svg>
+      </div>
+      <div class="launch-error-title">Launch failed</div>
+      <div class="launch-error-message">{launchError}</div>
+    </section>
+  {/if}
+
+  <button class="debug-toggle" onclick={() => debugOpen = !debugOpen}>
+    {debugOpen ? '×' : '$_'}
+  </button>
+
+  {#if debugOpen}
+    <div class="debug-console" transition:fade={{ duration: 120 }}>
+      <div class="debug-header">
+        <span>Debug Console</span>
+        <button onclick={() => logEntries = []}>Clear</button>
+      </div>
+      <div class="debug-body">
+        {#each logEntries as entry}
+          <p class:debug-warn={entry.type === 'warn'} class:debug-error={entry.type === 'error'} class:debug-backend={entry.type === 'backend'}>
+            <span class="debug-time">{entry.time}</span>
+            <span class="debug-type">[{entry.type}]</span>
+            <span class="debug-msg">{entry.msg}</span>
+          </p>
+        {/each}
+      </div>
+    </div>
+  {/if}
+</main>
+
+<style lang="postcss">
+  @reference "../app.css";
+
+  @font-face {
+    font-family: "Museo Sans Local";
+    font-style: normal;
+    font-weight: 100;
+    font-display: block;
+    src: url("/fonts/MuseoSans-100.woff") format("woff");
+  }
+
+  @font-face {
+    font-family: "Museo Sans Local";
+    font-style: normal;
+    font-weight: 300;
+    font-display: block;
+    src: url("/fonts/MuseoSans-300.woff") format("woff");
+  }
+
+  @font-face {
+    font-family: "Museo Sans Local";
+    font-style: normal;
+    font-weight: 500;
+    font-display: block;
+    src: url("/fonts/MuseoSans_500.woff") format("woff");
+  }
+
+  @font-face {
+    font-family: "Museo Sans Local";
+    font-style: normal;
+    font-weight: 700;
+    font-display: block;
+    src: url("/fonts/MuseoSans_700.woff") format("woff");
+  }
+
+  @font-face {
+    font-family: "Museo Sans Local";
+    font-style: normal;
+    font-weight: 900;
+    font-display: block;
+    src: url("/fonts/MuseoSans_900.woff") format("woff");
+  }
+
+  @font-face {
+    font-family: "Inter Variable";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: block;
+    src: url("/fonts/InterVariable.woff2") format("woff2-variations");
+  }
+
+  :global(html),
+  :global(body) {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family: "Museo Sans Local";
+    font-feature-settings: "liga" 1, "calt" 1;
+    color: white;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  :global(button) {
+    font: inherit;
+  }
+
+  :global(:root) {
+    --ease-smooth: cubic-bezier(.22, 1, .36, 1);
+    --ease-soft: cubic-bezier(.25, .1, .25, 1);
+    --nl-text: rgba(255, 255, 255, 0.88);
+    --nl-disabled-text: rgba(255, 255, 255, 0.38);
+    --nl-active-text: #FFFFFF;
+    --nl-small-text: rgba(255, 255, 255, 0.575);
+    --nl-sidebar-text: rgba(255, 255, 255, 0.589);
+    --nl-logo: white;
+    --nl-main-bg: #080206;
+    --nl-main-bg-opaque: #080206;
+    --nl-popup-bg: rgba(8, 2, 6, 0.65);
+    --nl-preview-bg: #0a0307;
+    --nl-border: rgba(255, 255, 255, 0.04);
+    --nl-frame-bg: #0a0307;
+    --nl-frame-active-bg: rgba(12, 4, 8, 0.72);
+    --nl-text-preview: rgba(247, 245, 255, 0.8);
+    --nl-window-title-bg: rgba(4, 1, 3, 0.96);
+    --nl-active-window-title: rgba(255, 255, 255, 0.88);
+    --nl-spinner: #f472b6;
+    --nl-block-bg: #0a0307;
+    --nl-block-bg-opaque: #0a0307;
+    --nl-sidebar-selection: rgba(255, 255, 255, 0.06);
+    --nl-button: #f06292;
+    --nl-button-active: #ec4899;
+    --nl-button-active-text: rgba(255, 255, 255, 0.9);
+    --nl-link: #f472b6;
+    --nl-link-active: white;
+    --nl-selection: rgba(30, 8, 18, 0.78);
+    --nl-separator: rgba(255, 255, 255, 0.03);
+    --nl-shadow: rgba(136, 30, 80, 0.35);
+    --nl-shadow-soft: rgba(0, 0, 0, 0.48);
+  }
+
+  :global(svg) {
+    display: block;
+    width: 1em;
+    height: 1em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .click-away {
+    @apply fixed inset-0 z-[5] border-0 bg-transparent p-0;
+  }
+
+  .shell {
+    @apply fixed left-1/2 top-1/2 z-10 overflow-hidden bg-[var(--nl-main-bg-opaque)];
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--nl-shadow), transparent 78%),
+      0 0 16px color-mix(in srgb, var(--nl-shadow), transparent 72%),
+      0 10px 24px rgba(0, 0, 0, 0.24);
+    transform: translate(-50%, -50%);
+    width: 260px;
+    height: 260px;
+    border-radius: 9px;
+    transition:
+      width 600ms var(--ease-smooth),
+      height 600ms var(--ease-smooth),
+      border-radius 500ms var(--ease-smooth);
+  }
+
+  .shell.boot {
+    opacity: 0;
+    animation: shell-appear 700ms var(--ease-smooth) forwards;
+  }
+
+  .shell.expanded {
+    width: 530px;
+    height: 400px;
+    border-radius: 10px;
+  }
+
+  @keyframes shell-appear {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+    100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+
+  .boot-view {
+    @apply absolute inset-0 grid place-items-center;
+    transition: opacity 400ms var(--ease-soft), transform 400ms var(--ease-smooth);
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  .boot-view.hidden {
+    opacity: 0;
+    transform: scale(0.96);
+    pointer-events: none;
+  }
+
+  .boot-spinner {
+    @apply relative size-[34px] rounded-full animate-[spin_1400ms_linear_infinite];
+  }
+
+  .boot-spinner svg {
+    @apply size-full text-[var(--nl-spinner)];
+    filter: drop-shadow(0 0 7px rgba(150, 164, 255, 0.22));
+  }
+
+  .boot-spinner circle {
+    @apply fill-none stroke-current;
+    stroke-width: 4;
+    stroke-linecap: round;
+    stroke-dasharray: 1 107;
+    stroke-dashoffset: 0;
+    transform-origin: 50% 50%;
+    animation: spinner-arc 1400ms ease-in-out infinite;
+  }
+
+
+
+  .launcher-view {
+    @apply absolute inset-0;
+    transition: opacity 500ms var(--ease-soft) 200ms;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .launcher-view.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+
+  .logo {
+    @apply absolute left-[18px] top-[22px] flex items-center;
+    line-height: 0;
+  }
+
+  .logo-icon {
+    width: 32px;
+    height: 32px;
+    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--nl-button), transparent 55%));
+  }
+
+  .side-nav {
+    @apply absolute left-[18px] top-[105px] grid gap-4;
+  }
+
+  .side-nav button,
+  .footer-links button {
+    @apply border-0 bg-transparent p-0 text-left text-[13px] font-light transition-colors duration-[130ms] ease-in-out;
+  }
+
+  .side-nav button {
+    @apply text-[var(--nl-text)];
+  }
+
+  .footer-links button {
+    @apply text-[var(--nl-text)];
+  }
+
+  .side-nav button:hover,
+  .footer-links button:hover {
+    color: color-mix(in srgb, var(--nl-text), var(--nl-active-text) 50%);
+  }
+
+  .profile {
+    @apply absolute bottom-5 left-5 flex w-[132px] items-center gap-2 border-0 bg-transparent p-0 text-left text-sm font-thin leading-7 text-[var(--nl-active-text)] transition-opacity duration-[130ms] ease-in-out;
+  }
+
+  .profile:hover,
+  .profile.active {
+    @apply opacity-[0.82];
+  }
+
+  .profile span:last-child {
+    @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap;
+  }
+
+  .avatar {
+    @apply relative block size-10 flex-none overflow-hidden rounded-[10px];
+    background:
+      radial-gradient(circle at 50% 36%, rgba(255, 255, 255, 0.82) 0 10%, transparent 11%),
+      radial-gradient(circle at 38% 50%, #efe1d6 0 13%, transparent 14%),
+      radial-gradient(circle at 58% 52%, #f3d7c9 0 12%, transparent 13%),
+      radial-gradient(circle at 50% 70%, #1d1d25 0 25%, transparent 26%),
+      linear-gradient(135deg, #c9cbd2, #4b4d57);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+    @apply opacity-90;
+  }
+
+  .avatar img {
+    @apply block size-full object-cover;
+  }
+
+  .profile-popout {
+    @apply absolute left-1/2 top-1/2 z-10 h-[340px] w-[460px] overflow-hidden rounded-[10px] border border-[rgba(255,255,255,0.075)];
+    background: var(--nl-main-bg-opaque);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.018),
+      0 18px 42px var(--nl-shadow-soft);
+    transform: translate(-50%, -50%);
+  }
+
+  .profile-close {
+    @apply right-[15px] top-[18px];
+  }
+
+  .profile-content {
+    @apply absolute right-5 bottom-[17px] left-5 top-[46px];
+  }
+
+  .profile-popout-avatar {
+    @apply mx-auto size-[84px] border-0 p-0 opacity-100;
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+      0 10px 28px color-mix(in srgb, var(--nl-shadow), transparent 22%);
+  }
+
+  .profile-popout-avatar::before {
+    content: "";
+    @apply absolute inset-0 z-[1] rounded-[10px] bg-black/0 transition-colors duration-150 ease-in-out;
+  }
+
+  .profile-popout-avatar span {
+    @apply absolute inset-x-0 bottom-0 z-[2] translate-y-full bg-black/[0.72] pt-[5px] pb-[7px] text-center text-[10px] font-medium leading-none text-white transition-transform duration-[170ms] ease-in-out;
+  }
+
+  .profile-popout-avatar:hover::before {
+    @apply bg-black/[0.28];
+  }
+
+  .profile-popout-avatar:hover span {
+    @apply translate-y-0;
+  }
+
+  .avatar-file {
+    @apply hidden;
+  }
+
+  .profile-name-card {
+    @apply mt-3 grid h-[32px] place-items-center;
+  }
+
+  .profile-name-card input {
+    @apply h-[32px] w-[178px] box-border rounded-[5px] border border-transparent bg-transparent px-2.5 py-0 text-center text-[15px] font-medium text-[var(--nl-active-text)] outline-0 transition-[background,border-color] duration-[130ms] ease-in-out;
+  }
+
+  .profile-name-card input:hover,
+  .profile-name-card input:focus {
+    background: color-mix(in srgb, var(--nl-main-bg-opaque), white 4%);
+    border-color: color-mix(in srgb, var(--nl-link), white 18%);
+  }
+
+  .profile-error {
+    @apply mt-[7px] mb-0 text-center text-[11px] leading-[1.35] text-[#ff8d8d];
+  }
+
+  .profile-actions {
+    @apply mt-[10px] flex justify-center gap-2;
+  }
+
+  .profile-actions button {
+    @apply h-7 min-w-[62px] rounded-md border border-[var(--nl-border)] bg-transparent px-2.5 py-0 text-xs font-light text-[var(--nl-text)] transition-[background,color,opacity] duration-[130ms] ease-in-out;
+  }
+
+  .profile-actions button:hover {
+    color: color-mix(in srgb, var(--nl-text), var(--nl-active-text) 50%);
+  }
+
+  .profile-actions button:disabled {
+    @apply opacity-[0.55];
+  }
+
+  .profile-actions .save-profile {
+    @apply border-transparent bg-[var(--nl-button)] text-[var(--nl-button-active-text)];
+  }
+
+  .profile-actions .save-profile:hover {
+    background: var(--nl-button-active);
+    color: var(--nl-button-active-text);
+  }
+
+  .profile-wip {
+    @apply absolute inset-x-0 bottom-2 flex items-center justify-center gap-2 text-[12px] font-light text-[var(--nl-small-text)];
+  }
+
+  .profile-wip svg {
+    @apply size-[15px];
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+
+  .window-controls {
+    @apply absolute right-[17px] top-[15px] z-[15] flex items-center gap-2;
+  }
+
+  .window-controls button,
+  .detail-close {
+    @apply grid size-6 place-items-center border-0 bg-transparent p-0 text-[var(--nl-text)] transition-[color,opacity] duration-[120ms] ease-in-out;
+  }
+
+  .minimize::before {
+    content: none;
+  }
+
+  .minimize span {
+    @apply block h-[1.5px] w-3 rounded-full bg-current;
+  }
+
+  .minimize:hover {
+    color: var(--nl-active-text);
+  }
+
+  .close svg,
+  .detail-close svg {
+    width: 19px;
+    height: 19px;
+    stroke-width: 2.45;
+    shape-rendering: geometricPrecision;
+    pointer-events: none;
+  }
+
+  .close:hover,
+  .detail-close:hover {
+    color: var(--nl-active-text);
+  }
+
+  .subscriptions {
+    @apply absolute left-44 top-4 w-[323px];
+  }
+
+  .subscriptions h1 {
+    @apply m-0 translate-x-[7px] text-[19px] font-medium leading-[1.7] text-[var(--nl-active-text)];
+  }
+
+  .subscriptions > p {
+    @apply mt-1.5 mb-[45px] translate-x-[7px] text-[14.5px] font-light text-[var(--nl-text)];
+  }
+
+  .subscription-card {
+    @apply relative mb-[11px] block h-[73px] w-full overflow-hidden rounded-xl border-[0.5px] border-solid border-[var(--nl-border)] bg-[var(--nl-block-bg)] p-0 text-left;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.018);
+  }
+
+  .subscription-card.disabled {
+    opacity: 0.4;
+    cursor: not-allowed !important;
+    pointer-events: none;
+    filter: grayscale(100%);
+  }
+
+  .subscription-card em.not-installed-label {
+    color: #ff6b6b;
+    font-weight: 500;
+  }
+
+  .subscription-card.active {
+    @apply cursor-default;
+    animation: card-in 360ms 260ms ease-in-out both;
+    transition: none;
+  }
+
+  .subscription-card span {
+    @apply absolute left-3 top-2;
+  }
+
+  .subscription-card strong {
+    @apply block text-[13.5px] font-medium text-[var(--nl-active-text)];
+  }
+
+  .subscription-card em {
+    @apply mt-[9px] block text-[13px] font-thin not-italic text-[var(--nl-text-preview)];
+  }
+
+  .game-icon {
+    @apply pointer-events-none absolute right-3 top-1/2 size-[60px] -translate-y-1/2 rounded-[10px] object-cover;
+  }
+
+  .background-dim {
+    @apply absolute inset-0 z-[8] cursor-default border-0 bg-black/0 p-0;
+    transition: background 360ms var(--ease-soft);
+  }
+
+  .background-dim.visible {
+    @apply bg-[rgba(0,0,0,0.66)];
+  }
+
+  .details {
+    @apply absolute left-1/2 top-1/2 z-10 h-[340px] w-[460px] overflow-hidden rounded-[10px] bg-[var(--nl-main-bg-opaque)];
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--nl-shadow), transparent 78%),
+      0 0 16px color-mix(in srgb, var(--nl-shadow), transparent 72%),
+      0 10px 24px rgba(0, 0, 0, 0.24);
+    transform: translate(-50%, -50%);
+    animation: panel-in 320ms var(--ease-smooth) both;
+    transition:
+      width 520ms var(--ease-smooth),
+      height 520ms var(--ease-smooth),
+      opacity 260ms var(--ease-soft),
+      transform 320ms var(--ease-smooth),
+      border-radius 420ms var(--ease-smooth),
+      background 360ms var(--ease-soft);
+  }
+
+  .details.launching {
+    @apply h-[250px] w-[375px] rounded bg-[var(--nl-main-bg-opaque)] pointer-events-none;
+    animation: none;
+  }
+
+  .details.closing {
+    @apply opacity-0 pointer-events-none;
+    animation: none;
+    transform: translate(-50%, -50%) scale(0.985);
+    transition:
+      opacity 210ms var(--ease-soft),
+      transform 240ms var(--ease-smooth);
+  }
+
+  .detail-content {
+    @apply absolute inset-0 z-[1] opacity-100;
+    transition: opacity 280ms var(--ease-soft), transform 320ms var(--ease-smooth);
+    transform: translateY(0) scale(1);
+  }
+
+  .details.fading .detail-content {
+    @apply opacity-0 pointer-events-none;
+    transform: translateY(2px) scale(0.995);
+  }
+
+  .details header {
+    @apply relative h-[70px] border-b border-[var(--nl-separator)];
+  }
+
+  .details.skeet-details .large {
+    filter: drop-shadow(0 0 10px rgba(34, 197, 94, 0.4));
+  }
+
+  .details.skeet-details .load {
+    box-shadow:
+      inset 0 0 0 1px rgba(34, 197, 94, 0.2),
+      0 0 20px rgba(34, 197, 94, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .details .large {
+    @apply left-[17px] top-1/2 size-[38px] -translate-y-1/2 rounded-[10px];
+  }
+
+  .details h2 {
+    @apply absolute left-[58px] top-1/2 m-0 -translate-y-1/2 text-lg font-medium text-[var(--nl-active-text)];
+  }
+
+  .game-selector {
+    @apply absolute right-14 top-1/2 flex -translate-y-1/2 gap-1;
+  }
+
+  .game-option {
+    @apply h-[26px] cursor-pointer rounded-md border border-[var(--nl-border)] bg-transparent px-3 py-0 text-[11px] font-medium text-[var(--nl-text)] transition-[background,color] duration-[130ms] ease-in-out;
+  }
+
+  .game-option:hover {
+    @apply text-[var(--nl-active-text)];
+    background: color-mix(in srgb, var(--nl-button-active), transparent 50%);
+  }
+
+  .game-option.active {
+    @apply border-transparent text-[var(--nl-button-active-text)];
+    background: var(--nl-button);
+  }
+
+  .detail-close {
+    @apply absolute right-[15px] top-[25px] text-lg;
+  }
+
+  .detail-body {
+    @apply grid grid-cols-[197px_1fr] gap-0 px-5 pt-4 pb-0;
+  }
+
+  .metadata p,
+  .metadata-row,
+  .changelog p {
+    @apply m-0 text-[13px] font-light leading-[1.85];
+  }
+
+  .metadata p,
+  .metadata-row {
+    @apply mb-[3px];
+  }
+
+  .metadata-row {
+    @apply relative;
+  }
+
+  .metadata-row.with-menu {
+    @apply flex flex-nowrap items-center gap-1;
+  }
+
+  .metadata .label {
+    @apply flex-none font-light text-[var(--nl-active-text)];
+  }
+
+  .metadata .value {
+    @apply ml-1 font-medium text-[var(--nl-link)];
+  }
+
+  .metadata-trigger {
+    @apply m-0 inline-grid h-[22px] max-w-[150px] items-center gap-1.5 rounded-[5px] bg-transparent px-[7px] py-0 text-left font-medium text-[var(--nl-link)] align-middle;
+    grid-template-columns: 15px minmax(0, auto);
+    border: 1px solid color-mix(in srgb, var(--nl-border), var(--nl-text) 14%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--nl-border), transparent 45%);
+    font: inherit;
+    font-weight: 500;
+    transition: background 130ms ease-in-out, border-color 130ms ease-in-out, box-shadow 130ms ease-in-out, color 130ms ease-in-out;
+  }
+
+  .metadata-trigger:focus {
+    outline: none;
+  }
+
+  .metadata-trigger:focus-visible {
+    outline: 1px solid color-mix(in srgb, var(--nl-button-active), transparent 45%);
+    outline-offset: 1px;
+  }
+
+  .metadata-trigger span:last-child {
+    @apply overflow-hidden text-ellipsis whitespace-nowrap;
+  }
+
+  .metadata-trigger:hover {
+    border-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+    background: color-mix(in srgb, var(--nl-button-active), transparent 50%);
+    color: var(--nl-active-text);
+  }
+
+  .metadata-trigger.active {
+    border-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+    background: var(--nl-button);
+    color: var(--nl-button-active-text);
+  }
+
+  .config-trigger {
+    max-width: 128px;
+  }
+
+  .version-trigger {
+    max-width: 132px;
+  }
+
+  .trigger-icon {
+    @apply block size-[15px] justify-self-center text-current;
+  }
+
+  .branch-icon-small {
+    background: currentColor;
+    mask: url("/git-branch.svg") center / contain no-repeat;
+    -webkit-mask: url("/git-branch.svg") center / contain no-repeat;
+  }
+
+  .cog-icon-small {
+    display: inline-flex;
+  }
+
+  .cog-icon-small svg {
+    @apply size-[15px];
+    stroke-width: 1.65;
+  }
+
+  .metadata-menu {
+    @apply absolute left-[68px] top-7 z-[35] max-h-[116px] w-max min-w-[132px] max-w-[196px] overflow-auto rounded-[10px] py-1.5;
+    border: 1px solid color-mix(in srgb, var(--nl-button-active), transparent 84%);
+    background: color-mix(in srgb, var(--nl-popup-bg), transparent 22%);
+    box-shadow:
+      0 0 14px color-mix(in srgb, var(--nl-button-active), transparent 94%),
+      inset 0 0 0 1px color-mix(in srgb, var(--nl-button-active), transparent 95%),
+      0 12px 30px var(--nl-shadow-soft);
+    backdrop-filter: blur(9px);
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--nl-active-text), transparent 78%) transparent;
+    transform-origin: left top;
+    animation: menu-in 190ms ease-in-out both;
+  }
+
+  .config-menu {
+    min-width: 132px;
+    max-width: 164px;
+  }
+
+  .metadata-menu button {
+    @apply relative isolate mx-0 block h-[26px] w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-none border-0 bg-transparent px-[11px] py-0 text-left text-[13px] font-light text-[var(--nl-text-preview)];
+    transition: background 130ms ease-in-out, color 130ms ease-in-out, text-shadow 130ms ease-in-out;
+  }
+
+  .metadata-menu button::before {
+    @apply pointer-events-none absolute inset-y-0 left-2 right-2 z-[-1] rounded-[5px] opacity-0;
+    content: "";
+    background: var(--nl-selection);
+    transition: opacity 130ms ease-in-out;
+  }
+
+  .metadata-menu button:hover {
+    color: color-mix(in srgb, var(--nl-active-text), var(--nl-text-preview) 50%);
+    background: transparent;
+    text-shadow: 0 0 10px color-mix(in srgb, var(--nl-active-text), transparent 86%);
+  }
+
+  .metadata-menu button:hover::before {
+    @apply opacity-50;
+  }
+
+  .metadata-menu button:active {
+    color: var(--nl-active-text);
+  }
+
+  .metadata-menu .selected,
+  .metadata-menu .selected:hover {
+    color: var(--nl-active-text);
+    text-shadow: none;
+  }
+
+  .metadata-menu button:active::before,
+  .metadata-menu .selected:active::before {
+    @apply opacity-100;
+  }
+
+  .metadata-menu button:disabled {
+    @apply pointer-events-none text-[var(--nl-text-preview)] opacity-[0.58];
+  }
+
+  .changelog {
+    height: 100%;
+  }
+
+  .changelog > p:first-child,
+  .date {
+    @apply mb-2 text-[13px] font-light leading-[1.9] text-[var(--nl-active-text)];
+  }
+
+  .changelog a {
+    font-weight: 500;
+    color: var(--nl-link);
+    text-decoration: none;
+    transition: color 130ms ease-in-out;
+  }
+
+  .changelog a:hover {
+    color: var(--nl-link-active);
+  }
+
+  .changelog p:not(.date) {
+    @apply text-[13px] font-light leading-[1.9] text-[var(--nl-text)];
+  }
+
+  .changelog p:not(.date) {
+    @apply text-[12.5px] font-light leading-[1.8] text-[var(--nl-text)];
+  }
+
+  .details footer {
+    @apply absolute right-[17px] bottom-[15px] left-[17px] flex h-7 items-center justify-between;
+  }
+
+  .footer-links {
+    display: flex;
+    gap: 15px;
+  }
+
+  .actions {
+    position: relative;
+    display: grid;
+    grid-template-columns: 32px 102px;
+    gap: 7px;
+    align-items: center;
+  }
+
+  .manual-metadata-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    line-height: normal;
+  }
+  .manual-metadata-row input {
+    display: none;
+  }
+  .manual-metadata-row label {
+    position: relative;
+    padding-left: 34px;
+    cursor: pointer;
+    user-select: none;
+    color: var(--nl-text);
+    opacity: 0.55;
+    transition: opacity 0.15s ease;
+  }
+  .manual-metadata-row label::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 7px;
+    transition: background 0.2s ease;
+  }
+  .manual-metadata-row label::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 10px;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.5);
+    border-radius: 50%;
+    transition: left 0.2s ease, background 0.2s ease;
+  }
+  .manual-metadata-row input:checked + label {
+    opacity: 0.9;
+  }
+  .manual-metadata-row input:checked + label::before {
+    background: var(--nl-button);
+  }
+  .manual-metadata-row input:checked + label::after {
+    left: 16px;
+    background: #fff;
+  }
+  .manual-metadata-row input:disabled + label {
+    opacity: 0.25;
+    cursor: not-allowed;
+  }
+
+  .branch-trigger,
+  .load {
+    @apply inline-flex h-7 items-center justify-center rounded-md text-[13px] font-light text-[var(--nl-button-active-text)];
+  }
+
+  .branch-trigger {
+    width: 32px;
+    border: 1px solid color-mix(in srgb, var(--nl-border), var(--nl-text) 14%);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--nl-border), transparent 35%);
+    transition: background 130ms ease-in-out, border-color 130ms ease-in-out, box-shadow 130ms ease-in-out;
+  }
+
+  .branch-trigger svg {
+    @apply size-[19px];
+    stroke-width: 1.65;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .branch-trigger:hover {
+    border-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+    background: color-mix(in srgb, var(--nl-button-active), transparent 50%);
+  }
+
+  .branch-trigger.invisible {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .branch-trigger.active {
+    border-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+    background: var(--nl-button);
+  }
+
+  .load {
+    @apply w-[102px] border-0 bg-[var(--nl-button)] transition-[background,opacity] duration-[130ms] ease-in-out;
+  }
+
+  .load .play-icon {
+    @apply mr-3 ml-[-4px] inline-flex text-[var(--nl-button-active-text)];
+  }
+
+  .load svg {
+    @apply h-5 w-[18px] fill-none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .load:hover {
+    background: var(--nl-button-active);
+  }
+
+  .load:disabled {
+    @apply pointer-events-none opacity-[0.55];
+  }
+
+  .branch-menu {
+    @apply absolute left-[34px] top-[-34px] z-30 h-[66px] w-[122px] overflow-hidden rounded-md pt-2;
+    border: 1px solid color-mix(in srgb, var(--nl-button-active), transparent 84%);
+    background: color-mix(in srgb, var(--nl-popup-bg), transparent 28%);
+    box-shadow:
+      0 0 14px color-mix(in srgb, var(--nl-button-active), transparent 94%),
+      inset 0 0 0 1px color-mix(in srgb, var(--nl-button-active), transparent 95%),
+      0 12px 30px var(--nl-shadow-soft);
+    backdrop-filter: blur(9px);
+    transform-origin: left bottom;
+    animation: menu-in 190ms ease-in-out both;
+  }
+
+  .branch-menu button {
+    @apply relative isolate mx-0 grid h-[29px] w-full items-center rounded-none border-0 bg-transparent py-0 pr-0 pl-[14px] text-left text-sm font-thin text-[var(--nl-text-preview)];
+    grid-template-columns: 24px 1fr;
+    column-gap: 11px;
+    transition: background 130ms ease-in-out, color 130ms ease-in-out, text-shadow 130ms ease-in-out;
+  }
+
+  .branch-menu button::before {
+    @apply pointer-events-none absolute inset-y-0 left-2 right-2 z-[-1] rounded-[5px] opacity-0;
+    content: "";
+    background: var(--nl-selection);
+    transition: opacity 130ms ease-in-out;
+  }
+
+  .branch-menu button > * {
+    @apply relative z-[1];
+  }
+
+  .branch-icon {
+    @apply block size-[17px] justify-self-center bg-current opacity-90;
+    mask: url("/git-branch.svg") center / contain no-repeat;
+    -webkit-mask: url("/git-branch.svg") center / contain no-repeat;
+  }
+
+  .branch-menu button:hover {
+    color: var(--nl-active-text);
+    background: transparent;
+    text-shadow: 0 0 10px color-mix(in srgb, var(--nl-active-text), transparent 86%);
+  }
+
+  .branch-menu button:hover::before {
+    @apply opacity-50;
+  }
+
+  .branch-menu button:active {
+    color: var(--nl-active-text);
+  }
+
+  .branch-menu .selected,
+  .branch-menu .selected:hover {
+    color: var(--nl-active-text);
+    text-shadow: none;
+  }
+
+  .branch-menu button:active::before,
+  .branch-menu .selected:active::before {
+    @apply opacity-100;
+  }
+
+  .launch-content {
+    --launch-content-width: 249px;
+    @apply pointer-events-none absolute inset-0 z-[2] grid place-items-center content-center opacity-0;
+    transform: scale(0.985);
+    transition:
+      opacity 260ms 260ms var(--ease-soft),
+      transform 420ms 220ms var(--ease-smooth);
+  }
+
+  .details.launching .launch-content {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  .game-icon.launch {
+    @apply static size-[46px] rounded-[7px];
+    animation: launch-icon-pulse 2s var(--ease-smooth) infinite;
+    transform-origin: center;
+  }
+
+  .launch-status {
+    @apply mt-[30px] mb-4 flex items-center justify-center gap-[10px] w-[var(--launch-content-width)];
+  }
+
+  .launch-dot {
+    @apply inline-block size-[7px] rounded-full bg-[var(--nl-button)];
+    animation: launch-dot-pulse 1.2s ease-in-out infinite;
+    box-shadow: 0 0 8px color-mix(in srgb, var(--nl-button), transparent 20%);
+  }
+
+  .launch-phase {
+    @apply text-[13px] font-light text-[var(--nl-text)] tracking-[0.02em] select-none;
+  }
+
+  .progress {
+    @apply h-[3px] w-[var(--launch-content-width)] overflow-hidden rounded-full bg-[var(--nl-frame-bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.3)];
+  }
+
+  .progress span {
+    @apply block h-full rounded-[inherit];
+    background: linear-gradient(90deg, var(--nl-button), color-mix(in srgb, var(--nl-button), white 25%));
+    transition: width 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+
+  @keyframes fill {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+  }
+
+  @keyframes spin {
+    to { transform: rotate(1turn); }
+  }
+
+  @keyframes spinner-arc {
+    0% {
+      stroke-dasharray: 1 107;
+      stroke-dashoffset: 0;
+    }
+    50% {
+      stroke-dasharray: 78 107;
+      stroke-dashoffset: -18;
+    }
+    100% {
+      stroke-dasharray: 1 107;
+      stroke-dashoffset: -106;
+    }
+  }
+
+  @keyframes launch-error-icon-in {
+    from { opacity: 0; transform: scale(0.6) rotate(-10deg); }
+    to { opacity: 0.8; transform: scale(1) rotate(0deg); }
+  }
+
+  @keyframes launch-dot-pulse {
+    0%, 100% { opacity: 0.5; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1.15); }
+  }
+
+  @keyframes launch-icon-pulse {
+    0%,
+    100% {
+      opacity: 0.68;
+      filter: brightness(0.72) saturate(0.9) drop-shadow(0 0 6px color-mix(in srgb, var(--nl-button), transparent 50%));
+      transform: scale(0.88);
+    }
+    50% {
+      opacity: 1;
+      filter: brightness(1.12) saturate(1.08) drop-shadow(0 0 24px color-mix(in srgb, var(--nl-button), transparent 10%));
+      transform: scale(1.08);
+    }
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes menu-in {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes card-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes panel-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -49%) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+  }
+
+  .launch-error {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 20;
+    width: 320px;
+    padding: 36px 28px 28px;
+    border-radius: 10px;
+    background: var(--nl-main-bg-opaque);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, #ff5252, transparent 78%),
+      0 0 24px color-mix(in srgb, #ff5252, transparent 88%),
+      0 18px 42px var(--nl-shadow-soft);
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    box-sizing: border-box;
+  }
+
+  .launch-error-icon {
+    color: #ff5252;
+    opacity: 0.9;
+    margin-bottom: 14px;
+    animation: launch-error-icon-in 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  .launch-error-icon svg {
+    filter: drop-shadow(0 0 18px rgba(255, 82, 82, 0.35));
+  }
+
+  .launch-error-title {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #ff5252;
+    margin-bottom: 10px;
+    animation: fade-in 200ms 120ms both;
+  }
+
+  .launch-error-message {
+    font-size: 12px;
+    font-weight: 300;
+    line-height: 1.5;
+    overflow-y: auto;
+    max-height: 80px;
+    padding: 0 4px;
+    color: rgba(255, 82, 82, 0.7);
+    animation: fade-in 200ms 180ms both;
+    word-break: break-word;
+    margin-bottom: 18px;
+  }
+
+  .launch-error-icon svg {
+    filter: drop-shadow(0 0 18px rgba(255, 82, 82, 0.35));
+  }
+
+  .debug-toggle {
+    position: fixed; bottom: 8px; right: 8px; z-index: 50;
+    display: grid; place-items: center;
+    width: 24px; height: 24px;
+    border-radius: 4px; border: 1px solid var(--nl-border);
+    background: var(--nl-frame-bg);
+    font-size: 11px; color: var(--nl-text);
+    opacity: 0.3; cursor: pointer; user-select: none;
+    font-family: monospace;
+    transition: opacity 120ms;
+  }
+  .debug-toggle:hover { opacity: 0.8; }
+
+  .debug-console {
+    position: fixed; bottom: 36px; right: 8px; z-index: 50;
+    width: 420px; max-height: 260px; overflow: hidden;
+    border-radius: 4px; border: 1px solid var(--nl-border);
+    background: color-mix(in srgb, var(--nl-frame-bg), black 20%);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    backdrop-filter: blur(8px);
+  }
+
+  .debug-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--nl-border);
+    font-size: 11px; color: var(--nl-text);
+    opacity: 0.7; user-select: none;
+  }
+  .debug-header button {
+    border: 0; background: transparent; padding: 0;
+    font-size: 11px; color: var(--nl-text);
+    opacity: 0.5; cursor: pointer;
+    font-family: inherit;
+  }
+  .debug-header button:hover { opacity: 1; }
+
+  .debug-body {
+    overflow-y: auto; padding: 6px;
+    max-height: 225px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--nl-border) transparent;
+  }
+  .debug-body p {
+    margin: 0; font-size: 11px; line-height: 1.5;
+    font-family: monospace;
+    word-break: break-all;
+  }
+
+  .debug-time { opacity: 0.4; margin-right: 4px; }
+  .debug-type { opacity: 0.5; margin-right: 4px; }
+  .debug-warn .debug-msg { color: #ffb347; }
+  .debug-error .debug-msg { color: #ff6b6b; }
+  .debug-backend .debug-type { color: #6bc5ff; }
+  .debug-msg { color: var(--nl-text); }
+</style>

@@ -1,0 +1,41 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="96" fill="#0D1117"/>
+
+  <g opacity="0.12">
+    <circle cx="256" cy="256" r="155" fill="url(#ambient)" opacity="0.4"/>
+  </g>
+
+  <path d="M256 126 L176 220 L256 268 L336 220 Z" fill="url(#topLeft)"/>
+  <path d="M256 126 L256 268 L336 220 Z" fill="url(#topRight)"/>
+  <path d="M176 220 L256 268 L256 396 L216 270 Z" fill="url(#bottomLeft)"/>
+  <path d="M256 268 L336 220 L256 396 L296 270 Z" fill="url(#bottomRight)"/>
+
+  <path d="M256 126 L176 220 L256 268 Z" fill="url(#glint)" opacity="0.15"/>
+
+  <defs>
+    <linearGradient id="topLeft" x1="256" y1="126" x2="176" y2="268">
+      <stop offset="0%" stop-color="#6b8aff"/>
+      <stop offset="100%" stop-color="#3f66f5"/>
+    </linearGradient>
+    <linearGradient id="topRight" x1="256" y1="126" x2="336" y2="268">
+      <stop offset="0%" stop-color="#5580ff"/>
+      <stop offset="100%" stop-color="#2a4fdb"/>
+    </linearGradient>
+    <linearGradient id="bottomLeft" x1="176" y1="220" x2="256" y2="396">
+      <stop offset="0%" stop-color="#2a4fdb"/>
+      <stop offset="100%" stop-color="#162a8a"/>
+    </linearGradient>
+    <linearGradient id="bottomRight" x1="336" y1="220" x2="256" y2="396">
+      <stop offset="0%" stop-color="#1d39b0"/>
+      <stop offset="100%" stop-color="#0e1d70"/>
+    </linearGradient>
+    <linearGradient id="glint" x1="256" y1="126" x2="176" y2="268">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="ambient" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#4a7aff"/>
+      <stop offset="100%" stop-color="#4a7aff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+</svg>
