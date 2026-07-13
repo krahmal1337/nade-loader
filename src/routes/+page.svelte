@@ -1031,7 +1031,7 @@
             onclick={() => { product = 'skeet'; game = 'cs2-csgo_legacy'; openDetails(); }}
           >
           <span>
-            <strong>Skeet</strong>
+            <strong>gamesense.pub</strong>
             {#if anyInstalled}
               <em>Get good. Get gamesense.</em>
             {:else}
@@ -1058,7 +1058,7 @@
           <div class="detail-content">
             <header>
               <img class="game-icon large" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
-              <h2>{product === 'skeet' ? 'Skeet' : 'NeverNade'}</h2>
+              <h2>{product === 'skeet' ? 'gamesense.pub' : 'NeverNade'}</h2>
               {#if !manualLaunch}
               <div class="game-selector">
                 <button
@@ -1746,14 +1746,9 @@
   }
 
   .details.skeet-details .large {
-    filter: drop-shadow(0 0 10px rgba(34, 197, 94, 0.4));
   }
 
   .details.skeet-details .load {
-    box-shadow:
-      inset 0 0 0 1px rgba(34, 197, 94, 0.2),
-      0 0 20px rgba(34, 197, 94, 0.15),
-      inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
 
   .details .large {
