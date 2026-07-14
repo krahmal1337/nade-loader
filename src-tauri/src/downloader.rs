@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use serde::{Deserialize, Serialize};
 use crate::error::LauncherError;
 use crate::steam;
@@ -307,6 +309,7 @@ pub fn kill_background_processes() -> Result<(), LauncherError> {
     {
         Command::new("taskkill")
             .args(["/im", "injector.exe", "/f"])
+            .creation_flags(0x08000000)
             .spawn()
             .map(|_| ())
             .map_err(|error| LauncherError::System(format!("failed to kill injector: {error}")))?;
