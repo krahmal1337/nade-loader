@@ -51,13 +51,19 @@ pub struct LauncherTheme {
 }
 
 pub async fn load_launcher_theme() -> Result<LauncherTheme, LauncherError> {
-    let cloud = nl_cloud_path()?;
+    let cloud = match nl_cloud_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(default_theme("no cloud path")),
+    };
     let state_path = cloud.join("state.json");
-    let state_text = tokio::fs::read_to_string(&state_path)
-        .await
-        .map_err(|error| LauncherError::Io(format!("failed to read {}: {error}", state_path.display())))?;
-    let state: CloudState = serde_json::from_str(&state_text)
-        .map_err(|error| LauncherError::SerdeJson(format!("failed to parse {}: {error}", state_path.display())))?;
+    let state_text = match tokio::fs::read_to_string(&state_path).await {
+        Ok(t) => t,
+        Err(_) => return Ok(default_theme("no state")),
+    };
+    let state: CloudState = match serde_json::from_str(&state_text) {
+        Ok(s) => s,
+        Err(_) => return Ok(default_theme("bad state")),
+    };
 
     let style_id = state
         .type7_blob
@@ -66,11 +72,14 @@ pub async fn load_launcher_theme() -> Result<LauncherTheme, LauncherError> {
         .or(state.last_loaded_style_id);
 
     let Some(style_id) = style_id else {
-        return Ok(default_theme("built-in style"));
+        return Ok(default_theme("no style"));
     };
 
     if let Some((name, style_text)) = builtin_style(style_id) {
-        let colors = decode_style_colors(style_text)?;
+        let colors = match decode_style_colors(style_text) {
+            Ok(c) => c,
+            Err(_) => return Ok(default_theme("bad builtin style")),
+        };
         return Ok(LauncherTheme {
             source: format!("built-in {name} style"),
             variables: build_launcher_variables(&colors),
@@ -88,10 +97,14 @@ pub async fn load_launcher_theme() -> Result<LauncherTheme, LauncherError> {
         entry.entry_id,
         sanitize_filename(&entry.name)
     ));
-    let style_text = tokio::fs::read_to_string(&style_path)
-        .await
-        .map_err(|error| LauncherError::Io(format!("failed to read {}: {error}", style_path.display())))?;
-    let colors = decode_style_colors(&style_text)?;
+    let style_text = match tokio::fs::read_to_string(&style_path).await {
+        Ok(t) => t,
+        Err(_) => return Ok(default_theme("no style file")),
+    };
+    let colors = match decode_style_colors(&style_text) {
+        Ok(c) => c,
+        Err(_) => return Ok(default_theme("bad style")),
+    };
 
     Ok(LauncherTheme {
         source: style_path.display().to_string(),
@@ -123,7 +136,9 @@ pub fn default_theme(source: &str) -> LauncherTheme {
 }
 
 pub fn nl_cloud_path() -> Result<PathBuf, LauncherError> {
-    Ok(PathBuf::from(r"C:\nevernade\cloud"))
+    let steam = crate::steam::get_steam_install_path()
+        .ok_or_else(|| LauncherError::System("steam not found".to_string()))?;
+    Ok(steam.join("steamapps\\common\\Counter-Strike Global Offensive\\nl_cloud"))
 }
 
 fn builtin_style(_style_id: i32) -> Option<(&'static str, &'static str)> {
