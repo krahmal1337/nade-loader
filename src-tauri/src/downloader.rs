@@ -298,6 +298,22 @@ pub async fn prepare_version(tag: String, dll_name: String) -> Result<String, La
 pub async fn wait_and_inject(dll_path: String, dll_name: String) -> Result<(), LauncherError> {
     eprintln!("[loader] wait_and_inject: dll_path={dll_path}, dll_name={dll_name}");
     let pid = wait_for_csgo_process(30).await?;
+    eprintln!("[loader] csgo found, PID={pid}");
+
+    if let Some(exe_path) = steam::get_process_image_path(pid) {
+        eprintln!("[loader] csgo exe path: {exe_path}");
+        if let Some(game_dir) = std::path::Path::new(&exe_path).parent() {
+            steam::save_csgo_path_registry(&game_dir.to_string_lossy());
+            let nl_cloud = game_dir.join("nl_cloud");
+            if !nl_cloud.join("state.json").exists() || !nl_cloud.join("avatar.png").exists() {
+                eprintln!("[loader] creating nl_cloud files in {}", nl_cloud.display());
+                let _ = std::fs::create_dir_all(&nl_cloud);
+                let _ = std::fs::write(nl_cloud.join("state.json"), crate::theme::DEFAULT_STATE_JSON);
+                let _ = std::fs::write(nl_cloud.join("avatar.png"), crate::theme::DEFAULT_AVATAR);
+            }
+        }
+    }
+
     eprintln!("[loader] injecting DLL into PID {pid}");
     steam::inject_dll(pid, &dll_path, dll_name == "skeet.dll")?;
     eprintln!("[loader] injection successful");

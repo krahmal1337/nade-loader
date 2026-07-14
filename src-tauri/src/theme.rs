@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-const DEFAULT_AVATAR: &[u8] = include_bytes!("../defaults/avatar.png");
+pub(crate) const DEFAULT_AVATAR: &[u8] = include_bytes!("../defaults/avatar.png");
 use serde::{Deserialize, Serialize};
 use base64::Engine as _;
 use rmpv::Value;
@@ -14,7 +14,7 @@ const STYLE_SELECTION_KEY_1: &str = "2090499946";
 const STYLE_SELECTION_KEY_2: &str = "993947594";
 const STYLE_SELECTION_KEY_3: &str = "277698370";
 
-const DEFAULT_STATE_JSON: &str = include_str!("../defaults/state.json");
+pub(crate) const DEFAULT_STATE_JSON: &str = include_str!("../defaults/state.json");
 
 #[derive(Debug, Deserialize)]
 pub struct CloudState {
@@ -136,6 +136,12 @@ pub fn default_theme(source: &str) -> LauncherTheme {
 }
 
 pub fn nl_cloud_path() -> Result<PathBuf, LauncherError> {
+    if let Some(saved) = crate::steam::read_csgo_path_registry() {
+        let p = PathBuf::from(&saved).join("nl_cloud");
+        if p.join("state.json").exists() {
+            return Ok(p);
+        }
+    }
     let steam = crate::steam::get_steam_install_path()
         .ok_or_else(|| LauncherError::System("steam not found".to_string()))?;
     Ok(steam.join("steamapps\\common\\Counter-Strike Global Offensive\\nl_cloud"))

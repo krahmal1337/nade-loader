@@ -1,13 +1,15 @@
 use std::ffi::CString;
 use std::path::PathBuf;
 use crate::error::LauncherError;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 use winreg::RegKey;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, HWND},
-    System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE},
+    System::Threading::{OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE},
     UI::Shell::ShellExecuteA,
     UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE, SW_HIDE},
 };
@@ -45,6 +47,24 @@ pub fn get_steam_install_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+pub fn save_csgo_path_registry(path: &str) {
+    if let Ok((key, _)) = RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .create_subkey("Software\\nadeloader")
+    {
+        let _ = key.set_value("csgo_path", &path);
+    }
+}
+
+pub fn read_csgo_path_registry() -> Option<String> {
+    if let Ok(key) = RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey("Software\\nadeloader")
+    {
+        key.get_value::<String, _>("csgo_path").ok()
+    } else {
+        None
+    }
 }
 
 #[cfg(not(windows))]
@@ -157,6 +177,30 @@ pub fn find_csgo_pid() -> Option<u32> {
 
 #[cfg(not(windows))]
 pub fn find_csgo_pid() -> Option<u32> {
+    None
+}
+
+#[cfg(windows)]
+pub fn get_process_image_path(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buf = vec![0u16; 260];
+        let mut size = buf.len() as u32;
+        let result = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size);
+        CloseHandle(handle);
+        if result == 0 {
+            return None;
+        }
+        buf.truncate(size as usize);
+        Some(String::from_utf16_lossy(&buf))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn get_process_image_path(_pid: u32) -> Option<String> {
     None
 }
 
