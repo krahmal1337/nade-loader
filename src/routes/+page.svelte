@@ -698,7 +698,7 @@
         : typeof error === 'string' ? error
         : error && typeof error === 'object' && 'message' in error ? (error as {message: string}).message
         : JSON.stringify(error);
-      launchError = msg.replace(/^[^:]*:\s*/, '');
+      launchError = msg.replace(/^(?:LauncherError|Reqwest|I\/O|System|Validation|JSON|MessagePack):\s*/i, '');
       launchPending = false;
       launchPhase = 'Failed';
       if (view === 'launching') view = 'closingDetails';
