@@ -473,33 +473,43 @@ pub fn find_game_install_path(game_name: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     {
         if let Ok(cur) = std::env::current_dir() {
-            let exe_check = cur.join("csgo.exe");
-            if exe_check.exists() {
+            if cur.join("csgo.exe").exists() {
                 return Some(cur);
             }
         }
-        let steam_path = get_steam_install_path()?;
-        let check = |lib: &Path| -> bool {
-            let full = lib.join("steamapps").join("common").join(game_name).join("csgo.exe");
-            full.exists()
-        };
-        if check(&steam_path) {
-            return Some(steam_path.join("steamapps").join("common").join(game_name));
+        // Try known/common Steam library paths
+        let known_libs = vec![
+            get_steam_install_path(),
+            Some(PathBuf::from(r"C:\Program Files (x86)\Steam")),
+            Some(PathBuf::from(r"D:\Steam")),
+            Some(PathBuf::from(r"E:\Steam")),
+        ];
+        for lib in known_libs.into_iter().flatten() {
+            let candidate = lib.join("steamapps").join("common").join(game_name);
+            if candidate.join("csgo.exe").exists() {
+                return Some(candidate);
+            }
         }
+        // Parse libraryfolders.vdf for secondary library paths
+        let steam_path = get_steam_install_path()
+            .or_else(|| Some(PathBuf::from(r"C:\Program Files (x86)\Steam")))?;
         let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
         if let Ok(content) = std::fs::read_to_string(&vdf_path) {
-            let mut pos = 0usize;
-            while let Some(start) = content[pos..].find("\"path\"") {
-                let start = pos + start + 6;
-                let v_start = content[start..].find('"')?;
-                let v_start = start + v_start + 1;
-                let v_end = content[v_start..].find('"')?;
-                let lib_path = &content[v_start..v_start + v_end];
-                let lib = Path::new(lib_path);
-                if check(lib) {
-                    return Some(lib.join("steamapps").join("common").join(game_name));
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("\"path\"") {
+                    if let Some(start) = trimmed.find('"') {
+                        let rest = &trimmed[start+1..];
+                        if let Some(end) = rest.find('"') {
+                            let lib_path = &rest[..end];
+                            let lib = Path::new(lib_path);
+                            let candidate = lib.join("steamapps").join("common").join(game_name);
+                            if candidate.join("csgo.exe").exists() {
+                                return Some(candidate);
+                            }
+                        }
+                    }
                 }
-                pos = v_start + v_end;
             }
         }
     }
