@@ -36,5 +36,16 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBQ0QwQUU0QjQ4RUNBODcKUldTSHlvNjA1QXJOMnVZb3VvV21ScE9TU2I5MFcvb1IvYjFVcG1uY0dlKzc3TTJJcDhzUjhrZlgK",
+      "endpoints": [
+        "https://github.com/krahmal1337/nade-loader/releases/latest/download/updater.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

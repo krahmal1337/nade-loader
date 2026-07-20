@@ -39,3 +39,7 @@ Thumbs.db
 
 # oldsrc
 /oldsrc/
+
+# Signing keys
+keys
+keys.pub

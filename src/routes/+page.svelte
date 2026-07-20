@@ -5,6 +5,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { check } from '@tauri-apps/plugin-updater';
 
   type Branch = 'Release' | 'Nightly';
   type Game = 'cs2-csgo_legacy' | 'csgo';
@@ -84,6 +85,41 @@
   let closeTimer: number | undefined;
   let debugOpen = $state(false);
   let logEntries = $state<{ time: string; msg: string; type: string }[]>([]);
+  let updateAvailable = $state(false);
+  let updateChecking = $state(false);
+  let updateVersion = $state('');
+  let updateObj: Awaited<ReturnType<typeof check>> | null = null;
+
+  async function checkUpdate() {
+    updateChecking = true;
+    try {
+      const update = await check();
+      if (update?.available) {
+        updateAvailable = true;
+        updateVersion = update.version;
+        updateObj = update;
+        logToConsole(`Update ${update.version} available`, 'log');
+      } else {
+        updateAvailable = false;
+        updateVersion = '';
+        updateObj = null;
+        logToConsole('No update available', 'log');
+      }
+    } catch (e) {
+      console.warn('[ui] update check failed:', e);
+    } finally {
+      updateChecking = false;
+    }
+  }
+
+  async function installUpdate() {
+    try {
+      logToConsole('Installing update...', 'log');
+      await updateObj?.downloadAndInstall();
+    } catch (e) {
+      console.warn('[ui] install update failed:', e);
+    }
+  }
 
   function logToConsole(msg: string, type: string = 'log') {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -1151,6 +1187,15 @@
               <div class="footer-links">
                 <button onclick={() => openExternal(DISCORD_URL)}>Community</button>
                 <button onclick={() => openExternal(API_DOCS_URL)}>API Documentation</button>
+                {#if updateAvailable}
+                  <button class="update-btn" onclick={installUpdate}>
+                    Update to {updateVersion}
+                  </button>
+                {:else if updateChecking}
+                  <button class="update-btn" disabled>Checking...</button>
+                {:else}
+                  <button class="update-btn" onclick={checkUpdate}>Check Update</button>
+                {/if}
               </div>
 
               <div class="actions">
@@ -1467,6 +1512,17 @@
   .side-nav button:hover,
   .footer-links button:hover {
     color: color-mix(in srgb, var(--nl-text), var(--nl-active-text) 50%);
+  }
+
+  .update-btn {
+    color: var(--nl-button);
+  }
+  .update-btn:hover {
+    color: color-mix(in srgb, var(--nl-button), var(--nl-button-active-text) 50%);
+  }
+  .update-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .profile {
