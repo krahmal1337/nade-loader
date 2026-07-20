@@ -1054,6 +1054,7 @@
             <header>
               <img class="game-icon large" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
               <h2>{product === 'skeet' ? 'gamesense.pub' : 'NeverNade'}</h2>
+              {#if !manualLaunch}
               <div class="game-selector">
                 <button
                   class="game-option"
@@ -1068,6 +1069,7 @@
                   onclick={() => game = 'csgo'}
                 >Standalone</button>
               </div>
+              {/if}
               <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
             </header>
 
