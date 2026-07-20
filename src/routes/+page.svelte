@@ -1015,17 +1015,11 @@
           <button
             class="subscription-card"
             class:active={product === 'neverlose'}
-            class:disabled={!anyInstalled}
-            disabled={!anyInstalled}
             onclick={() => { product = 'neverlose'; game = 'cs2-csgo_legacy'; openDetails(); }}
           >
           <span>
             <strong>NeverNade</strong>
-            {#if anyInstalled}
-              <em>neverlose crack by nademafia</em>
-            {:else}
-              <em class="not-installed-label">⚠️ Not Installed</em>
-            {/if}
+            <em>neverlose crack by nademafia</em>
           </span>
           <img class="game-icon" src="/nl.png" alt="" draggable="false" />
         </button>
@@ -1033,16 +1027,11 @@
           <button
             class="subscription-card"
             class:active={product === 'skeet'}
-            disabled={!anyInstalled}
             onclick={() => { product = 'skeet'; game = 'cs2-csgo_legacy'; openDetails(); }}
           >
           <span>
             <strong>gamesense.pub</strong>
-            {#if anyInstalled}
-              <em>Get good. Get gamesense.</em>
-            {:else}
-              <em class="not-installed-label">⚠️ Not Installed</em>
-            {/if}
+            <em>Get good. Get gamesense.</em>
           </span>
           <img class="game-icon" src="/skeet.png" alt="" draggable="false" />
         </button>
@@ -1065,20 +1054,20 @@
             <header>
               <img class="game-icon large" src="/{product === 'skeet' ? 'skeet' : 'nl'}.png" alt="" draggable="false" />
               <h2>{product === 'skeet' ? 'gamesense.pub' : 'NeverNade'}</h2>
-              {#if !manualLaunch}
               <div class="game-selector">
                 <button
                   class="game-option"
                   class:active={game === 'cs2-csgo_legacy'}
+                  disabled={!installedStatus.cs2_legacy_branch}
                   onclick={() => game = 'cs2-csgo_legacy'}
                 >Legacy</button>
                 <button
                   class="game-option"
                   class:active={game === 'csgo'}
+                  disabled={!installedStatus.csgo_standalone}
                   onclick={() => game = 'csgo'}
                 >Standalone</button>
               </div>
-              {/if}
               <button aria-label="Close details" class="detail-close" onclick={closeDetails}>{@render IconClose()}</button>
             </header>
 
@@ -1662,18 +1651,6 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.018);
   }
 
-  .subscription-card.disabled {
-    opacity: 0.4;
-    cursor: not-allowed !important;
-    pointer-events: none;
-    filter: grayscale(100%);
-  }
-
-  .subscription-card em.not-installed-label {
-    color: #ff6b6b;
-    font-weight: 500;
-  }
-
   .subscription-card.active {
     @apply cursor-default;
     animation: card-in 360ms 260ms ease-in-out both;
@@ -1781,6 +1758,11 @@
   .game-option.active {
     @apply border-transparent text-[var(--nl-button-active-text)];
     background: var(--nl-button);
+  }
+
+  .game-option:disabled {
+    @apply cursor-not-allowed border-[var(--nl-frame-bg)] text-[var(--nl-muted)] opacity-40;
+    background: transparent;
   }
 
   .detail-close {
