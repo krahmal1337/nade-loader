@@ -241,23 +241,19 @@ async fn download_github_asset(client: &reqwest::Client, repo: &str, tag: &str, 
     Ok(())
 }
 
-async fn wait_for_csgo_process(timeout_secs: u64) -> Result<u32, LauncherError> {
-    eprintln!("[loader] waiting for csgo window (Valve001), timeout={timeout_secs}s");
-    let start = std::time::Instant::now();
+async fn wait_for_csgo_process() -> Result<u32, LauncherError> {
+    eprintln!("[loader] waiting for csgo window (Valve001), no timeout");
+    let mut elapsed = 0u64;
     loop {
         if let Some(pid) = steam::find_csgo_pid() {
             eprintln!("[loader] csgo process found, PID={pid}");
             return Ok(pid);
         }
-        let elapsed = start.elapsed().as_secs();
-        if elapsed >= timeout_secs {
-            eprintln!("[loader] timed out waiting for csgo process");
-            return Err(LauncherError::System("timed out waiting for csgo process".to_string()));
-        }
         if elapsed > 0 && elapsed % 5 == 0 {
             eprintln!("[loader] still waiting for csgo... ({elapsed}s)");
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        elapsed += 1;
     }
 }
 
@@ -297,7 +293,7 @@ pub async fn prepare_version(tag: String, dll_name: String) -> Result<String, La
 
 pub async fn wait_and_inject(dll_path: String, dll_name: String) -> Result<(), LauncherError> {
     eprintln!("[loader] wait_and_inject: dll_path={dll_path}, dll_name={dll_name}");
-    let pid = wait_for_csgo_process(30).await?;
+    let pid = wait_for_csgo_process().await?;
     eprintln!("[loader] csgo found, PID={pid}");
 
     if let Some(exe_path) = steam::get_process_image_path(pid) {

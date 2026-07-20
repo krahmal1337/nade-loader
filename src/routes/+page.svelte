@@ -676,10 +676,14 @@
       if (manualLaunch) {
         launchPhase = 'Launch CSGO manually...';
         console.log('[ui] manual launch: waiting for user to start CSGO');
+      } else if (game === 'csgo') {
+        launchPhase = 'Launching CS:GO standalone...';
+        console.log('[ui] launching CS:GO standalone...');
+        await invoke('launch_csgo_standalone');
       } else {
-        launchPhase = 'Launching game...';
-        console.log('[ui] launching game...');
-        await invoke('launch_game_process', { appid });
+        launchPhase = 'Launching CS2 Legacy...';
+        console.log('[ui] launching CS2 Legacy branch...');
+        await invoke('launch_csgo_legacy_branch');
       }
 
       launchPhase = 'Waiting for CSGO...';

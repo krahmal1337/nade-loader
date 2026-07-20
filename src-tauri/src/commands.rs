@@ -62,6 +62,29 @@ pub fn launch_game_process(app: AppHandle, appid: i32) -> Result<(), LauncherErr
 }
 
 #[tauri::command]
+pub fn launch_csgo_standalone(app: AppHandle) -> Result<(), LauncherError> {
+    let gamedir = steam::find_game_install_path("csgo legacy")
+        .ok_or_else(|| LauncherError::System("CS:GO standalone directory not found".to_string()))?;
+    let gamedir = gamedir.to_string_lossy().to_string();
+    let _ = app.emit("log", &format!("launching CS:GO standalone from {gamedir}"));
+    steam::launch_standalone_csgo(&gamedir)?;
+    let _ = app.emit("log", "CS:GO standalone started");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn launch_csgo_legacy_branch(app: AppHandle) -> Result<(), LauncherError> {
+    let gamedir = steam::find_game_install_path("Counter-Strike Global Offensive")
+        .or_else(|| steam::find_game_install_path("Counter-Strike Global Offensive 730"))
+        .ok_or_else(|| LauncherError::System("CS2 Legacy directory not found".to_string()))?;
+    let gamedir = gamedir.to_string_lossy().to_string();
+    let _ = app.emit("log", &format!("launching CS:GO Legacy from {gamedir}"));
+    steam::launch_legacy_csgo(&gamedir)?;
+    let _ = app.emit("log", "CS:GO Legacy started");
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn wait_and_inject(app: AppHandle, dll_path: String, dll_name: String) -> Result<(), LauncherError> {
     let _ = app.emit("log", "waiting for CSGO window...");
     let result = downloader::wait_and_inject(dll_path, dll_name).await;
@@ -76,10 +99,12 @@ pub fn kill_background_processes() -> Result<(), LauncherError> {
 
 #[tauri::command]
 pub fn detect_installed_games() -> Result<steam::InstalledGames, LauncherError> {
+    let cs2 = steam::find_game_install_path("Counter-Strike Global Offensive").is_some()
+        || steam::find_game_install_path("Counter-Strike Global Offensive 730").is_some();
+    let csgo_std = steam::find_game_install_path("csgo legacy").is_some();
     Ok(steam::InstalledGames {
-        cs2_legacy_branch: true,
-        csgo_standalone: true,
+        cs2_legacy_branch: cs2,
+        csgo_standalone: csgo_std,
     })
 }
-
 

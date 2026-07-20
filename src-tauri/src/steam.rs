@@ -1,5 +1,6 @@
 use std::ffi::CString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use crate::error::LauncherError;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -465,6 +466,128 @@ pub fn inject_dll(pid: u32, dll_path: &str, skeet: bool) -> Result<(), LauncherE
 #[cfg(not(windows))]
 pub fn inject_dll(_pid: u32, _dll_path: &str, _skeet: bool) -> Result<(), LauncherError> {
     Err(LauncherError::System("injection not supported on this platform".to_string()))
+}
+
+// ─── Game install path detection ─────────────────────────────────
+pub fn find_game_install_path(game_name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Ok(cur) = std::env::current_dir() {
+            let exe_check = cur.join("csgo.exe");
+            if exe_check.exists() {
+                return Some(cur);
+            }
+        }
+        let steam_path = get_steam_install_path()?;
+        let check = |lib: &Path| -> bool {
+            let full = lib.join("steamapps").join("common").join(game_name).join("csgo.exe");
+            full.exists()
+        };
+        if check(&steam_path) {
+            return Some(steam_path.join("steamapps").join("common").join(game_name));
+        }
+        let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
+        if let Ok(content) = std::fs::read_to_string(&vdf_path) {
+            let mut pos = 0usize;
+            while let Some(start) = content[pos..].find("\"path\"") {
+                let start = pos + start + 6;
+                let v_start = content[start..].find('"')?;
+                let v_start = start + v_start + 1;
+                let v_end = content[v_start..].find('"')?;
+                let lib_path = &content[v_start..v_start + v_end];
+                let lib = Path::new(lib_path);
+                if check(lib) {
+                    return Some(lib.join("steamapps").join("common").join(game_name));
+                }
+                pos = v_start + v_end;
+            }
+        }
+    }
+    None
+}
+
+// ─── Standalone inventory fix helpers ────────────────────────────
+
+/// Forces ClientVersion=2000258 into csgo/steam.inf to fix inventory on standalone
+pub fn pin_client_version(gamedir: &str) {
+    let steam_inf = Path::new(gamedir).join("csgo").join("steam.inf");
+    if !steam_inf.exists() {
+        return;
+    }
+    let content = match std::fs::read_to_string(&steam_inf) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let version = "2000258";
+    let mut out = String::new();
+    let mut found = false;
+    for line in content.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed.starts_with("ClientVersion=") {
+            out.push_str(&format!("ClientVersion={}\r\n", version));
+            found = true;
+        } else {
+            out.push_str(trimmed);
+            out.push_str("\r\n");
+        }
+    }
+    if !found {
+        out.push_str(&format!("ClientVersion={}\r\n", version));
+    }
+    let _ = std::fs::write(&steam_inf, out);
+}
+
+/// Writes steam_appid.txt with given appid into game directory
+pub fn write_steam_appid(dir: &str, appid: &str) {
+    let path = Path::new(dir).join("steam_appid.txt");
+    let _ = std::fs::write(&path, appid);
+}
+
+/// Removes steam_appid.txt from game directory
+pub fn delete_steam_appid(dir: &str) {
+    let path = Path::new(dir).join("steam_appid.txt");
+    let _ = std::fs::remove_file(&path);
+}
+
+fn launch_csgo_exe(gamedir: &str, label: &str) -> Result<u32, LauncherError> {
+    use std::os::windows::process::CommandExt;
+
+    let child = Command::new(Path::new(gamedir).join("csgo.exe"))
+        .args(["-steam", "-insecure"])
+        .current_dir(gamedir)
+        .spawn()
+        .map_err(|e| LauncherError::System(format!("failed to launch csgo.exe: {e}")))?;
+
+    let pid = child.id();
+    eprintln!("[{label}] csgo.exe launched, PID={pid}");
+    Ok(pid)
+}
+
+#[cfg(windows)]
+pub fn launch_standalone_csgo(gamedir: &str) -> Result<u32, LauncherError> {
+    pin_client_version(gamedir);
+    std::env::set_var("SteamAppId", "730");
+    std::env::set_var("SteamGameId", "730");
+    write_steam_appid(gamedir, "730");
+    let pid = launch_csgo_exe(gamedir, "standalone")?;
+    delete_steam_appid(gamedir);
+    Ok(pid)
+}
+
+#[cfg(not(windows))]
+pub fn launch_standalone_csgo(_gamedir: &str) -> Result<u32, LauncherError> {
+    Err(LauncherError::System("standalone launch not supported on this platform".to_string()))
+}
+
+#[cfg(windows)]
+pub fn launch_legacy_csgo(gamedir: &str) -> Result<u32, LauncherError> {
+    // Legacy branch (CS2 Beta) — запускаем напрямую, фикс инвентаря не нужен
+    launch_csgo_exe(gamedir, "legacy")
+}
+
+#[cfg(not(windows))]
+pub fn launch_legacy_csgo(_gamedir: &str) -> Result<u32, LauncherError> {
+    Err(LauncherError::System("legacy launch not supported on this platform".to_string()))
 }
 
 

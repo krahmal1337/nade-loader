@@ -15,6 +15,8 @@ pub fn run() {
             commands::load_git_metadata,
             commands::prepare_version,
             commands::launch_game_process,
+            commands::launch_csgo_standalone,
+            commands::launch_csgo_legacy_branch,
             commands::wait_and_inject,
             commands::minimize_main_window,
             commands::close_main_window,
