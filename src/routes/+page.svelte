@@ -74,8 +74,6 @@
   let selectedVersion = $derived(product === 'skeet' ? skeetSelectedVersion : nlSelectedVersion);
   let launchPending = $state(false);
   let manualLaunch = $state(false);
-  let autoManual = $derived(!anyInstalled);
-  $effect(() => { if (autoManual) manualLaunch = true; });
   let launchError = $state('');
   let progress = $state(0);
   let lastLaunchTime = $state<Date | null>(null);
@@ -1126,7 +1124,7 @@
                   {/if}
                   <p><span class="label">Last Launch:</span> <span class="value">{lastLaunchLabel}</span></p>
                   <p class="manual-metadata-row">
-                    <input type="checkbox" bind:checked={manualLaunch} disabled={launchPending || autoManual} id="manual-launch" />
+                    <input type="checkbox" bind:checked={manualLaunch} disabled={launchPending} id="manual-launch" />
                     <label for="manual-launch">manual launch</label>
                   </p>
                 </div>
